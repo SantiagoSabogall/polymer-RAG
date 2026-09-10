@@ -32,5 +32,5 @@ lib/
 lib64/
 share/
 pyvenv.cfg
-.CACHEDIR.TAG
+CACHEDIR.TAG
 .lock

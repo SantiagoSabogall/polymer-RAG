@@ -34,7 +34,8 @@ from llm import parse_llm_json
 from cloudfareR2 import get_s3_client, list_pdfs, download_pdf, R2ConnectionError, DownloadError
 from pdf_to_markdown import pdf_to_markdown, ConversionError
 from clean_markdown import extract_doi, clean_markdown, CleanError
-from database import get_connection, insert_wvtr, get_stats, DatabaseError
+from database import get_connection, insert_wvtr, get_stats, DatabaseError, is_already_processed, release_connection
+from monitoring import StructuredLogger, CostTracker, PerformanceMetrics
 
 # ============================================
 # LOGGING
@@ -117,6 +118,38 @@ def add_error(errors: list, pdf_key: str, error_type: str, error_msg):
         "error_msg": str(error_msg),
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
     })
+
+
+# ============================================
+# PROGRESS TRACKING Y ERROR RECOVERY
+# ============================================
+
+def save_pipeline_state(state):
+    """Guarda el estado actual del pipeline."""
+    state_file = TEMP_DIR / "pipeline_state.json"
+    with open(state_file, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def load_pipeline_state():
+    """Carga el estado del pipeline (si existe)."""
+    state_file = TEMP_DIR / "pipeline_state.json"
+    if state_file.exists():
+        with open(state_file) as f:
+            return json.load(f)
+    return {"completed": [], "failed": [], "last_run": None}
+
+
+def should_skip(pdf_key, state, dois):
+    """Determina si un PDF debe ser saltado."""
+    # Ya completado en ejecución anterior
+    if pdf_key in state.get("completed", []):
+        return True
+    # DOI ya en BD
+    doi = dois.get(pdf_key)
+    if is_already_processed(doi):
+        return True
+    return False
 
 
 # ============================================
@@ -554,6 +587,11 @@ def main():
     ensure_dirs()
     start_time = time.time()
 
+    # Inicializar monitoreo
+    structured_logger = StructuredLogger("pipeline")
+    cost_tracker = CostTracker()
+    performance_metrics = PerformanceMetrics()
+
     logger.info("=" * 50)
     logger.info("PIPELINE TEST - GPT 5.6 Luna")
     logger.info("=" * 50)
@@ -565,6 +603,7 @@ def main():
         s3 = get_s3_client()
         pdfs = list_pdfs(s3)
         logger.info(f"PDFs encontrados en R2: {len(pdfs)}")
+        structured_logger.log_pipeline_start(len(pdfs))
     except R2ConnectionError as e:
         logger.error(f"Error conectando a R2: {e}")
         return
@@ -576,21 +615,34 @@ def main():
     progress["total_pdfs"] = len(pdfs)
     errors = load_json(ERRORS_FILE, [])
     dois = load_json(DOIS_FILE, {})
+    pipeline_state = load_pipeline_state()
 
     # Ejecutar FASE 1
+    performance_metrics.start_phase("phase1")
     phase1_count = run_phase_1(pdfs, progress, errors, dois)
+    performance_metrics.end_phase("phase1")
+    performance_metrics.metrics["phase1"]["pdfs_processed"] = phase1_count
 
     # ============================================
     # FASE 2: Extracción LLM
     # ============================================
     # Ejecutar FASE 2 (async)
+    performance_metrics.start_phase("phase2")
     llm_results = asyncio.run(run_phase_2(dois))
+    performance_metrics.end_phase("phase2")
+    performance_metrics.metrics["phase2"]["pdfs_processed"] = llm_stats["processed"]
+    performance_metrics.metrics["phase2"]["errors"] = llm_stats["errors"]
+    performance_metrics.metrics["phase2"]["total_tokens"] = llm_stats["total_tokens_in"] + llm_stats["total_tokens_out"]
 
     # ============================================
     # FASE 3: PostgreSQL
     # ============================================
     # Ejecutar FASE 3
+    performance_metrics.start_phase("phase3")
     db_stats = run_phase_3(llm_results, dois)
+    performance_metrics.end_phase("phase3")
+    if "error" not in db_stats:
+        performance_metrics.metrics["phase3"]["records_inserted"] = db_stats.get("total_registros", 0)
 
     # ============================================
     # RESUMEN FINAL
@@ -600,6 +652,20 @@ def main():
     seconds = int(total_latency % 60)
 
     total_registros = sum(len(r.get("registros", [])) for r in llm_results if "registros" in r)
+
+    # Guardar estado del pipeline
+    pipeline_state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    save_pipeline_state(pipeline_state)
+
+    # Log de métricas
+    metrics_summary = performance_metrics.get_summary()
+    structured_logger.log_pipeline_end({
+        "total_pdfs": len(pdfs),
+        "processed": phase1_count,
+        "llm_records": total_registros,
+        "duration_seconds": total_latency,
+        "metrics": metrics_summary
+    })
 
     logger.info("")
     logger.info("=" * 50)
@@ -613,6 +679,12 @@ def main():
     if "error" not in db_stats:
         logger.info(f"Total en BD:          {db_stats.get('total_registros', 0)}")
     logger.info(f"Tiempo total:         {minutes} min {seconds} sec")
+    logger.info("")
+    logger.info("MÉTRICAS DE RENDIMIENTO:")
+    logger.info(f"  FASE 1 (Descarga):  {metrics_summary['phase1_duration']:.1f}s")
+    logger.info(f"  FASE 2 (LLM):       {metrics_summary['phase2_duration']:.1f}s")
+    logger.info(f"  FASE 3 (BD):        {metrics_summary['phase3_duration']:.1f}s")
+    logger.info(f"  Total tokens:       {metrics_summary['phase2_tokens']:,}")
     logger.info("=" * 50)
 
 
