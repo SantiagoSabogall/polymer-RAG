@@ -3,7 +3,7 @@ import logging
 import psycopg2
 from psycopg2 import pool
 from psycopg2.extras import execute_values
-from config import PG_HOST, PG_DATABASE, PG_USER, PG_PASSWORD
+from config import PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,7 @@ def init_pool(minconn=2, maxconn=10):
         connection_pool = pool.ThreadedConnectionPool(
             minconn, maxconn,
             host=PG_HOST,
+            port=PG_PORT,
             database=PG_DATABASE,
             user=PG_USER,
             password=PG_PASSWORD
