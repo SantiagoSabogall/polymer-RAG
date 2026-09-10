@@ -25,6 +25,10 @@ Thumbs.db
 
 # Secrets (NO commitear API keys)
 API_KEY.env
+.env
+
+# Docker
+docker/postgres_data/
 
 # Virtual Environment
 bin/

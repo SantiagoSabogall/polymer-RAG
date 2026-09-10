@@ -1,0 +1,12 @@
+FROM postgres:18
+
+# Instalar dependencias para pgvector
+RUN apt-get update && \
+    apt-get install -y \
+    postgresql-18-pgvector \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copiar configuración
+RUN echo "shared_preload_libraries = 'vector'" >> /usr/share/postgresql/postgresql.conf.sample
+
+EXPOSE 5432
