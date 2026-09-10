@@ -324,12 +324,17 @@ async def process_file(client: AsyncOpenAI, semaphore: asyncio.Semaphore,
     """
     out_path = TEMP_RESULTS / f"{md_path.stem}__gpt-5.6-luna.json"
 
-    # Si ya existe el resultado, saltarlo
+    # Si ya existe el resultado, actualizar DOI si falta y saltarlo
     if out_path.exists():
+        existing_data = json.loads(out_path.read_text())
+        # Actualizar DOI en metadata si no existe
+        if existing_data.get("_meta", {}).get("doi") is None and doi:
+            existing_data["_meta"]["doi"] = doi
+            out_path.write_text(json.dumps(existing_data, indent=2, ensure_ascii=False))
         logger.info(f"[SKIP] {md_path.name} (ya existe)")
         llm_stats["skipped"] += 1
         log_llm_progress(total)
-        return json.loads(out_path.read_text())
+        return existing_data
 
     # Leer contenido del markdown
     content = md_path.read_text()
