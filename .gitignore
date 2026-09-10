@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+*.egg-info/
+*.egg
+
+# Temp
+temp/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (NO commitear API keys)
+API_KEY.env
+
+# Virtual Environment
+bin/
+lib/
+lib64/
+share/
+pyvenv.cfg
+.CACHEDIR.TAG
+.lock

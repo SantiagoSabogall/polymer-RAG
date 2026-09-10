@@ -1,0 +1,16 @@
+{
+  "_INSTRUCCIONES": "Para cada paper (.md) en papers/, define los WVTR esperados. Ejemplo:",
+  "paper_ejemplo.md": {
+    "expected": [
+      {
+        "polymer": "EVOH",
+        "wvtr_value": 4.5,
+        "wvtr_units": "g/m2/day",
+        "temperature": "38C",
+        "rh": "90%",
+        "thickness": "15 um",
+        "test_method": "ASTM F1249"
+      }
+    ]
+  }
+}
