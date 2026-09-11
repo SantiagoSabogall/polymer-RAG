@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wvtr-extraction"
+version = "1.2.0"
+description = "Automated Water Vapor Transmission Rate Data Extraction from Polymer Science Literature"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Sebastian Sabogal", email = "ssabogal@institution.edu"}
+]
+keywords = ["polymer", "wvtr", "rag", "llm", "extraction", "packaging"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+
+dependencies = [
+    # API
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "pydantic>=2.0.0",
+    
+    # LLM
+    "openai>=1.3.0",
+    
+    # Database
+    "psycopg2-binary>=2.9.0",
+    "pgvector>=0.2.0",
+    
+    # Utils
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+benchmark = [
+    "openpyxl>=3.1.0",
+]
+all = [
+    "wvtr-extraction[dev,benchmark]",
+]
+
+[project.urls]
+Homepage = "https://github.com/SantiagoSabogall/polymer-RAG"
+Repository = "https://github.com/SantiagoSabogall/polymer-RAG"
+Issues = "https://github.com/SantiagoSabogall/polymer-RAG/issues"
+
+[tool.setuptools.packages.find]
+include = ["src*", "api*", "benchmark*", "scripts*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
