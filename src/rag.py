@@ -28,6 +28,7 @@ LLM_MODEL = "openai/gpt-5.6-luna"
 def search_similar(query: str, limit: int = 10) -> list:
     """
     Busca registros similares usando embedding similarity.
+    Si la query menciona una temperatura, tambien busca por esa temperatura.
     
     Args:
         query: Pregunta del usuario
@@ -36,12 +37,11 @@ def search_similar(query: str, limit: int = 10) -> list:
     Returns:
         list: Lista de diccionarios con registros similares
     """
-    # 1. Generar embedding de la pregunta
-    query_embedding = get_embedding(query)
-    
-    # 2. Buscar en pgvector
     conn = get_connection()
     cur = conn.cursor()
+    
+    # 1. Buscar por embedding similarity
+    query_embedding = get_embedding(query)
     
     cur.execute("""
         SELECT 
@@ -53,12 +53,47 @@ def search_similar(query: str, limit: int = 10) -> list:
         LIMIT %s
     """, (str(query_embedding), limit))
     
-    results = cur.fetchall()
+    embedding_results = cur.fetchall()
+    
+    # 2. Detectar si se menciona una temperatura en la query
+    import re
+    temp_match = re.search(r'(\d+)\s*(?:grados?|°?C|celsius)', query, re.IGNORECASE)
+    temperature_results = []
+    
+    if temp_match:
+        temp_value = temp_match.group(1)
+        # Buscar registros con esa temperatura
+        cur.execute("""
+            SELECT 
+                id, article_title, doi, polymer, 
+                wvtr_value, wvtr_units, temperature, 
+                rh, thickness, test_method
+            FROM wvtr_data
+            WHERE temperature ILIKE %s
+        """, (f'%{temp_value}%',))
+        temperature_results = cur.fetchall()
+    
     release_connection(conn)
     
-    # 3. Formatear resultados
+    # 3. Combinar resultados (evitar duplicados)
+    seen_ids = set()
+    all_results = []
+    
+    # Primero los de temperatura (si hay)
+    for row in temperature_results:
+        if row[0] not in seen_ids:
+            seen_ids.add(row[0])
+            all_results.append(row)
+    
+    # Luego los de embedding
+    for row in embedding_results:
+        if row[0] not in seen_ids:
+            seen_ids.add(row[0])
+            all_results.append(row)
+    
+    # 4. Formatear resultados
     formatted = []
-    for row in results:
+    for row in all_results[:limit]:
         formatted.append({
             "id": row[0],
             "article_title": row[1],
