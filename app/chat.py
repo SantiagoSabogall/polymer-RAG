@@ -14,7 +14,7 @@ import streamlit as st
 from rag import rag_query
 
 # ============================================
-# CONFIGURACIÓN DE LA PÁGINA
+# CONFIGURACION DE LA PAGINA
 # ============================================
 
 st.set_page_config(
@@ -25,51 +25,66 @@ st.set_page_config(
 )
 
 # ============================================
-# ESTILOS CSS - TIPOGRAFÍAS ANTHROPIC
+# ESTILOS CSS - INTER + LORA
 # ============================================
 
 st.markdown("""
 <style>
-    /* Fuente principal - Anthropic Sans */
-    @import url('https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700&display=swap');
+    /* Importar fuentes desde Google Fonts */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&display=swap');
     
-    /* Fuente para código/respuestas - Anthropic Serif */
-    @import url('https://fonts.googleapis.com/css2?family=Source+Serif+Pro:wght@400;600;700&display=swap');
-    
-    /* Estilo general */
-    .stApp {
-        font-family: 'Source Sans Pro', sans-serif;
+    /* Fuente principal - Inter para todo */
+    .stApp, .stMarkdown, .stChatMessage, .stTextInput, .stButton {
+        font-family: 'Inter', sans-serif !important;
     }
     
-    /* Título */
+    /* Titulos - Lora */
+    h1, h2, h3, h4, h5, h6 {
+        font-family: 'Lora', serif !important;
+    }
+    
     h1 {
-        font-family: 'Source Sans Pro', sans-serif !important;
         font-weight: 700 !important;
+        font-size: 2.5rem !important;
     }
     
-    /* Subtítulo y descripción */
+    h2 {
+        font-weight: 600 !important;
+        font-size: 1.8rem !important;
+    }
+    
+    h3 {
+        font-weight: 600 !important;
+        font-size: 1.4rem !important;
+    }
+    
+    /* Texto general */
     .stMarkdown p {
-        font-family: 'Source Sans Pro', sans-serif !important;
+        font-family: 'Inter', sans-serif !important;
+        font-size: 1rem !important;
+        line-height: 1.6 !important;
     }
     
     /* Mensajes del usuario */
     .stChatMessage[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
-        font-family: 'Source Sans Pro', sans-serif !important;
+        font-family: 'Inter', sans-serif !important;
     }
     
     /* Mensajes del asistente */
     .stChatMessage[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
-        font-family: 'Source Serif Pro', serif !important;
+        font-family: 'Inter', sans-serif !important;
     }
     
     /* Input del usuario */
     .stTextInput input, .stTextArea textarea {
-        font-family: 'Source Sans Pro', sans-serif !important;
+        font-family: 'Inter', sans-serif !important;
     }
     
     /* Botones */
     .stButton button {
-        font-family: 'Source Sans Pro', sans-serif !important;
+        font-family: 'Inter', sans-serif !important;
+        font-weight: 500 !important;
     }
     
     /* Sidebar oculto */
@@ -80,6 +95,12 @@ st.markdown("""
     /* Eliminar padding innecesario */
     .block-container {
         padding-top: 2rem !important;
+        max-width: 800px !important;
+    }
+    
+    /* Chat input */
+    .stChatInput {
+        font-family: 'Inter', sans-serif !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -98,7 +119,7 @@ SUGGESTED_QUESTIONS = [
 ]
 
 # ============================================
-# TÍTULO Y DESCRIPCIÓN
+# TITULO Y DESCRIPCION
 # ============================================
 
 st.title("WVTR Assistant")

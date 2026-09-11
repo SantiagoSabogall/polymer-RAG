@@ -37,6 +37,23 @@ PDF Literature → Markdown → LLM Extraction → Structured JSON → PostgreSQ
 - **Structured Logging**: JSON-formatted logs for reproducibility and audit trails
 - **Cost Tracking**: Monitors API usage and associated costs
 
+### 1.4 Typography
+
+The application uses the following typography system:
+
+| Font | Usage | Source |
+|------|-------|--------|
+| **Inter** | Body text, UI elements, chat messages | Google Fonts |
+| **Lora** | Headings and titles | Google Fonts |
+
+```css
+/* Inter for body text */
+font-family: 'Inter', sans-serif;
+
+/* Lora for headings */
+h1, h2, h3 { font-family: 'Lora', serif; }
+```
+
 ---
 
 ## 2. Installation
