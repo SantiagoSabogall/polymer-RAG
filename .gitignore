@@ -30,6 +30,9 @@ API_KEY.env
 # Docker
 docker/postgres_data/
 
+# pgvector source (downloaded, not part of project)
+pgvector/
+
 # Virtual Environment
 bin/
 lib/
