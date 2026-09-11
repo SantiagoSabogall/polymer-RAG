@@ -19,32 +19,93 @@ from rag import rag_query
 
 st.set_page_config(
     page_title="WVTR Assistant",
-    page_icon="🧪",
-    layout="centered"
+    page_icon=" ",
+    layout="centered",
+    initial_sidebar_state="collapsed"
 )
+
+# ============================================
+# ESTILOS CSS - TIPOGRAFÍAS ANTHROPIC
+# ============================================
+
+st.markdown("""
+<style>
+    /* Fuente principal - Anthropic Sans */
+    @import url('https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700&display=swap');
+    
+    /* Fuente para código/respuestas - Anthropic Serif */
+    @import url('https://fonts.googleapis.com/css2?family=Source+Serif+Pro:wght@400;600;700&display=swap');
+    
+    /* Estilo general */
+    .stApp {
+        font-family: 'Source Sans Pro', sans-serif;
+    }
+    
+    /* Título */
+    h1 {
+        font-family: 'Source Sans Pro', sans-serif !important;
+        font-weight: 700 !important;
+    }
+    
+    /* Subtítulo y descripción */
+    .stMarkdown p {
+        font-family: 'Source Sans Pro', sans-serif !important;
+    }
+    
+    /* Mensajes del usuario */
+    .stChatMessage[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
+        font-family: 'Source Sans Pro', sans-serif !important;
+    }
+    
+    /* Mensajes del asistente */
+    .stChatMessage[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
+        font-family: 'Source Serif Pro', serif !important;
+    }
+    
+    /* Input del usuario */
+    .stTextInput input, .stTextArea textarea {
+        font-family: 'Source Sans Pro', sans-serif !important;
+    }
+    
+    /* Botones */
+    .stButton button {
+        font-family: 'Source Sans Pro', sans-serif !important;
+    }
+    
+    /* Sidebar oculto */
+    [data-testid="stSidebar"] {
+        display: none;
+    }
+    
+    /* Eliminar padding innecesario */
+    .block-container {
+        padding-top: 2rem !important;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # ============================================
 # PREGUNTAS SUGERIDAS
 # ============================================
 
 SUGGESTED_QUESTIONS = [
-    "¿Cuántos registros hay en la base de datos?",
-    "¿Cuál es el WVTR del PBAT?",
-    "¿Qué polímeros tienen mejor barrera que LDPE?",
+    "Cuantos registros hay en la base de datos?",
+    "Cual es el WVTR del PBAT?",
+    "Que polimeros tienen mejor barrera que LDPE?",
     "Compara PHBV con PHBV/clay nanocomposite",
     "Dame los valores de PLA",
-    "¿Qué polímeros son biodegradables?",
+    "Que polimeros son biodegradables?",
 ]
 
 # ============================================
 # TÍTULO Y DESCRIPCIÓN
 # ============================================
 
-st.title("🧪 WVTR Assistant")
+st.title("WVTR Assistant")
 st.markdown("""
-*Tu asistente experto en polímeros y barrera de empaque.*
+*Tu asistente experto en polimeros y barrera de empaque.*
 
-Pregúntame sobre datos de **Water Vapor Transmission Rate (WVTR)** de polímeros.
+Preguntame sobre datos de **Water Vapor Transmission Rate (WVTR)** de polimeros.
 """)
 
 # ============================================
@@ -68,13 +129,13 @@ for message in st.session_state.messages:
 if not st.session_state.messages:
     with st.chat_message("assistant"):
         st.markdown("""
-¡Hola! 👋 Soy **WVTR Assistant**, tu experto en polímeros y barrera de empaque.
+Hola! Soy **WVTR Assistant**, tu experto en polimeros y barrera de empaque.
 
 Puedo ayudarte a:
-- 🔍 Buscar datos WVTR de polímeros específicos
-- 📊 Comparar propiedades de barrera entre materiales
-- 📋 Obtener listas de polímeros por condiciones
-- 📈 Analizar tendencias en los datos
+- Buscar datos WVTR de polimeros especificos
+- Comparar propiedades de barrera entre materiales
+- Obtener listas de polimeros por condiciones
+- Analizar tendencias en los datos
 
 **Elige una pregunta sugerida o escribe la tuya:**
 """)
@@ -93,7 +154,7 @@ Puedo ayudarte a:
 # ============================================
 
 # Campo de entrada
-if prompt := st.chat_input("Escribe tu pregunta sobre polímeros..."):
+if prompt := st.chat_input("Escribe tu pregunta sobre polimeros..."):
     
     # Mostrar pregunta del usuario
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -115,32 +176,3 @@ if prompt := st.chat_input("Escribe tu pregunta sobre polímeros..."):
                 error_msg = f"Error al procesar tu pregunta: {str(e)}"
                 st.error(error_msg)
                 st.session_state.messages.append({"role": "assistant", "content": error_msg})
-
-# ============================================
-# BARRA LATERAL CON INFORMACIÓN
-# ============================================
-
-with st.sidebar:
-    st.header("ℹ️ Información")
-    
-    st.markdown("""
-    **WVTR Assistant** utiliza:
-    - 🧠 GPT-5.6 Luna para generar respuestas
-    - 🔍 pgvector para búsqueda semántica
-    - 📊 PostgreSQL con datos WVTR
-    
-    **Ejemplos de preguntas:**
-    - ¿Cuál es el WVTR del PBAT?
-    - Compara PHBV con PHBV/clay
-    - ¿Qué polímeros tienen mejor barrera?
-    - Dame los valores de PLA
-    """)
-    
-    st.divider()
-    
-    if st.button("🗑️ Limpiar chat"):
-        st.session_state.messages = []
-        st.rerun()
-    
-    st.divider()
-    st.caption("Desarrollado por Sebastian Sabogal")
