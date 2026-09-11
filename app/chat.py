@@ -24,6 +24,19 @@ st.set_page_config(
 )
 
 # ============================================
+# PREGUNTAS SUGERIDAS
+# ============================================
+
+SUGGESTED_QUESTIONS = [
+    "¿Cuántos registros hay en la base de datos?",
+    "¿Cuál es el WVTR del PBAT?",
+    "¿Qué polímeros tienen mejor barrera que LDPE?",
+    "Compara PHBV con PHBV/clay nanocomposite",
+    "Dame los valores de PLA",
+    "¿Qué polímeros son biodegradables?",
+]
+
+# ============================================
 # TÍTULO Y DESCRIPCIÓN
 # ============================================
 
@@ -46,6 +59,34 @@ if "messages" not in st.session_state:
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+
+# ============================================
+# MENSAJE DE BIENVENIDA + PREGUNTAS SUGERIDAS
+# ============================================
+
+# Mostrar bienvenida solo si no hay mensajes
+if not st.session_state.messages:
+    with st.chat_message("assistant"):
+        st.markdown("""
+¡Hola! 👋 Soy **WVTR Assistant**, tu experto en polímeros y barrera de empaque.
+
+Puedo ayudarte a:
+- 🔍 Buscar datos WVTR de polímeros específicos
+- 📊 Comparar propiedades de barrera entre materiales
+- 📋 Obtener listas de polímeros por condiciones
+- 📈 Analizar tendencias en los datos
+
+**Elige una pregunta sugerida o escribe la tuya:**
+""")
+        
+        # Botones de preguntas sugeridas
+        st.markdown("**Preguntas sugeridas:**")
+        cols = st.columns(2)
+        for i, question in enumerate(SUGGESTED_QUESTIONS):
+            col = cols[i % 2]
+            if col.button(question, key=f"suggest_{i}", use_container_width=True):
+                st.session_state.messages.append({"role": "user", "content": question})
+                st.rerun()
 
 # ============================================
 # INPUT DEL USUARIO
