@@ -93,7 +93,9 @@ def format_context(results: list) -> str:
    WVTR: {r['wvtr_value']} {r['wvtr_units']}
    Temperature: {r.get('temperature', 'N/A')}
    RH: {r.get('rh', 'N/A')}
-   Source: {r['article_title'][:80]}
+   Thickness: {r.get('thickness', 'N/A')}
+   Test Method: {r.get('test_method', 'N/A')}
+   Source: {r['article_title'][:100]}
    DOI: {r.get('doi', 'N/A')}
 """
         context_parts.append(part)
@@ -112,18 +114,49 @@ def generate_answer(question: str, context: str) -> str:
     Returns:
         str: Respuesta generada
     """
-    system_prompt = """Eres un experto en ciencia de polímeros y barrera de empaque.
+    system_prompt = """Eres un asistente experto en ciencia de polímeros y barrera de empaque.
+Tu nombre es WVTR Assistant.
 
-Tu tarea es responder preguntas sobre Water Vapor Transmission Rate (WVTR) basándote 
-únicamente en los datos proporcionados como contexto.
+Responde de forma natural y amigable, como si hablaras con un colega investigador.
+
+## Cómo responder:
+
+Cuando te pregunten por un polímero específico:
+1. Saluda de forma natural
+2. Presenta los datos en una lista organizada y clara
+3. Incluye TODAS las condiciones disponibles (temperatura, RH, espesor, método)
+4. Cita la fuente (artículo y DOI si está disponible)
+5. Ofrece ayuda adicional al final
+
+Ejemplo de respuesta ideal:
+"Hola! Encontré estos datos de PBAT en la base de datos:
+
+**PBAT** (puro)
+- WVTR: 4060 × 10⁻¹³ g·m/m²·s·Pa
+- Temperatura: 25°C
+- HR: 5% y 95%
+- Espesor: 60 μm
+- Método: ASTM E 96
+- Fuente: Improved barrier properties... (DOI: 10.1002/app.53855)
+
+¿Te gustaría que compare estos con otros polímeros?"
+
+Cuando te pregunten para comparar:
+- Organiza por polímero
+- Resalta las diferencias clave con negritas
+- Da una conclusión breve
+
+Cuando busquen por condiciones específicas:
+- Lista todos los polímeros que coincidan
+- Incluye las condiciones exactas
 
 Reglas:
 1. Responde SOLO basándote en los datos del contexto
-2. Cita las fuentes (artículos) cuando sea posible
-3. Si no hay datos suficientes, di "No tengo datos suficientes para responder"
-4. Usa unidades y condiciones exactas de los datos
-5. Si comparas polímeros incluye valores numéricos
-6. Si la consulta se hace en inglés responde en inglés"""
+2. Usa lenguaje natural pero preciso
+3. Si no hay datos, di "No encontré datos suficientes"
+4. Siempre incluye unidades exactas
+5. Responde en el idioma de la pregunta
+6. Usa markdown para organizar (negritas, listas)"""
 
     user_prompt = f"""
 Contexto de la base de datos WVTR:
@@ -143,6 +176,29 @@ Respuesta:"""
     )
     
     return response.choices[0].message.content
+
+
+def format_natural_response(answer: str, sources: list) -> str:
+    """
+    Agrega información de fuentes al final de la respuesta.
+    
+    Args:
+        answer: Respuesta generada por el LLM
+        sources: Fuentes utilizadas
+        
+    Returns:
+        str: Respuesta formateada con fuentes
+    """
+    if not sources:
+        return answer
+    
+    # Agregar sección de fuentes al final
+    sources_section = "\n\n---\n**Fuentes consultadas:**\n"
+    for i, s in enumerate(sources[:5], 1):  # Mostrar solo las 5 principales
+        doi = f" (DOI: {s['doi']})" if s.get('doi') else ""
+        sources_section += f"{i}. {s['article_title'][:60]}...{doi}\n"
+    
+    return answer + sources_section
 
 
 def rag_query(question: str, limit: int = 10) -> dict:
@@ -165,9 +221,12 @@ def rag_query(question: str, limit: int = 10) -> dict:
     # 3. Generar respuesta
     answer = generate_answer(question, context)
     
-    # 4. Retornar respuesta + fuentes
+    # 4. Formatear respuesta natural con fuentes
+    formatted_answer = format_natural_response(answer, results)
+    
+    # 5. Retornar respuesta + fuentes
     return {
-        "answer": answer,
+        "answer": formatted_answer,
         "sources": results,
         "context_used": context
     }
