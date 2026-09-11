@@ -75,17 +75,61 @@ def search_similar(query: str, limit: int = 10) -> list:
     return formatted
 
 
-def format_context(results: list) -> str:
+def get_db_stats() -> dict:
+    """
+    Obtiene estadísticas de la base de datos.
+    
+    Returns:
+        dict: Estadísticas de la BD
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT COUNT(*) FROM wvtr_data")
+    total_records = cur.fetchone()[0]
+    
+    cur.execute("SELECT COUNT(DISTINCT polymer) FROM wvtr_data")
+    total_polymers = cur.fetchone()[0]
+    
+    cur.execute("SELECT COUNT(DISTINCT article_title) FROM wvtr_data")
+    total_articles = cur.fetchone()[0]
+    
+    cur.execute("SELECT COUNT(*) FROM wvtr_data WHERE doi IS NOT NULL")
+    records_with_doi = cur.fetchone()[0]
+    
+    release_connection(conn)
+    
+    return {
+        "total_records": total_records,
+        "total_polymers": total_polymers,
+        "total_articles": total_articles,
+        "records_with_doi": records_with_doi
+    }
+
+
+def format_context(results: list, db_stats: dict = None) -> str:
     """
     Formatea resultados como contexto para el LLM.
     
     Args:
         results: Lista de resultados de búsqueda
+        db_stats: Estadísticas de la base de datos
         
     Returns:
         str: Contexto formateado
     """
     context_parts = []
+    
+    # Agregar estadísticas de la BD al inicio
+    if db_stats:
+        stats_section = f"""INFORMACIÓN DE LA BASE DE DATOS:
+- Total de registros WVTR: {db_stats['total_records']}
+- Polímeros únicos: {db_stats['total_polymers']}
+- Artículos únicos: {db_stats['total_articles']}
+- Registros con DOI: {db_stats['records_with_doi']}
+
+"""
+        context_parts.append(stats_section)
     
     for i, r in enumerate(results, 1):
         part = f"""
@@ -212,21 +256,25 @@ def rag_query(question: str, limit: int = 10) -> dict:
     Returns:
         dict: {answer, sources, context_used}
     """
-    # 1. Buscar registros similares
+    # 1. Obtener estadísticas de la BD
+    db_stats = get_db_stats()
+    
+    # 2. Buscar registros similares
     results = search_similar(question, limit)
     
-    # 2. Formatear contexto
-    context = format_context(results)
+    # 3. Formatear contexto con estadísticas
+    context = format_context(results, db_stats)
     
-    # 3. Generar respuesta
+    # 4. Generar respuesta
     answer = generate_answer(question, context)
     
-    # 4. Formatear respuesta natural con fuentes
+    # 5. Formatear respuesta natural con fuentes
     formatted_answer = format_natural_response(answer, results)
     
-    # 5. Retornar respuesta + fuentes
+    # 6. Retornar respuesta + fuentes
     return {
         "answer": formatted_answer,
         "sources": results,
-        "context_used": context
+        "context_used": context,
+        "db_stats": db_stats
     }
