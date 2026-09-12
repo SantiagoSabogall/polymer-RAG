@@ -15,5 +15,14 @@ services:
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
     restart: unless-stopped
 
+  adminer:
+    image: adminer
+    container_name: wvtr-adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
 volumes:
   pgdata:
