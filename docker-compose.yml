@@ -2,10 +2,12 @@ services:
   postgres:
     image: pgvector/pgvector:pg18
     container_name: wvtr-postgres
+    env_file:
+      - API_KEY.env
     environment:
       POSTGRES_DB: polymers_wvtr
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-Colombia2030}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
     ports:
       - "5433:5432"
     volumes:
