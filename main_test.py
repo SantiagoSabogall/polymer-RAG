@@ -694,4 +694,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RuntimeError as e:
+        if "cannot be called when another loop is running" in str(e):
+            import nest_asyncio
+            nest_asyncio.apply()
+            main()
+        else:
+            raise

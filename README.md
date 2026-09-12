@@ -3,8 +3,8 @@
 ## Automated Water Vapor Transmission Rate Data Extraction from Polymer Science Literature
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-12+-336791.svg)](https://www.postgresql.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18+-336791.svg)](https://www.postgresql.org/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
 ---
 
@@ -61,15 +61,15 @@ h1, h2, h3 { font-family: 'Lora', serif; }
 ### 2.1 Prerequisites
 
 - Python 3.10 or higher
-- PostgreSQL 12 or higher
+- Docker + Docker Compose
 - Cloudflare R2 account (for PDF storage)
 - OpenRouter API key (for LLM access)
 
 ### 2.2 Clone Repository
 
 ```bash
-git clone https://github.com/your-username/wvtr-extraction.git
-cd wvtr-extraction
+git clone https://github.com/SantiagoSabogall/polymer-RAG.git
+cd polymer-RAG
 ```
 
 ### 2.3 Create Virtual Environment
@@ -84,7 +84,15 @@ venv\Scripts\activate  # Windows
 ### 2.4 Install Dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
+```
+
+This installs all dependencies and the project itself. Optional extras:
+
+```bash
+pip install -e ".[dev]"      # + testing/linting tools
+pip install -e ".[benchmark]" # + Excel export
+pip install -e ".[all]"       # + everything
 ```
 
 ### 2.5 Configure Environment
@@ -193,7 +201,7 @@ psql -U postgres -d polymers_wvtr -f benchmark/explore.sql
 1. Open DBeaver → New Database Connection → PostgreSQL
 2. Configure:
    - Host: `localhost`
-   - Port: `5432`
+   - Port: `5433`
    - Database: `polymers_wvtr`
    - User: `postgres`
    - Password: `your-password`
@@ -349,8 +357,16 @@ ORDER BY wvtr_value;
 
 ### 8.1 Environment
 
+Dependencies are managed via `pyproject.toml`. To install:
+
 ```bash
-pip freeze > requirements.txt
+pip install -e .
+```
+
+To update dependencies after modifying `pyproject.toml`:
+
+```bash
+pip install -e .
 ```
 
 ### 8.2 Data Versioning
@@ -397,7 +413,7 @@ All pipeline runs generate structured logs in `temp/pipeline.log`:
 
 ## 10. License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ---
 

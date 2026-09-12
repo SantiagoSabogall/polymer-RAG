@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from rag import rag_query, search_similar
 from database import get_connection, release_connection
@@ -30,6 +31,14 @@ app = FastAPI(
     title="WVTR RAG API",
     description="API para consultas RAG sobre datos WVTR de polímeros",
     version="1.0.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -108,6 +117,7 @@ def search_records(request: QueryRequest):
 @app.get("/health")
 def health_check():
     """Verificar estado de la API y base de datos."""
+    conn = None
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -116,8 +126,7 @@ def health_check():
         
         cur.execute("SELECT COUNT(*) FROM wvtr_data WHERE embedding IS NOT NULL")
         with_embeddings = cur.fetchone()[0]
-        
-        release_connection(conn)
+        cur.close()
         
         return {
             "status": "healthy",
@@ -130,6 +139,9 @@ def health_check():
             "status": "unhealthy",
             "error": str(e)
         }
+    finally:
+        if conn:
+            release_connection(conn)
 
 
 # ============================================
@@ -138,4 +150,4 @@ def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="127.0.0.1", port=8001)

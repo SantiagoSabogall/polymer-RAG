@@ -8,7 +8,7 @@ Flujo:
 Pregunta → Embedding → Búsqueda → Contexto → LLM → Respuesta
 """
 
-import json
+import re
 from openai import OpenAI
 from database import get_connection, release_connection
 from embeddings import get_embedding, generate_record_text
@@ -25,10 +25,32 @@ llm_client = OpenAI(
 LLM_MODEL = "openai/gpt-5.6-luna"
 
 
+def _extract_temperature(query: str) -> str | None:
+    """
+    Extrae una temperatura de la query del usuario.
+    
+    Soporta: 38°C, 38 grados, 38C, temperatura 38, a 38, etc.
+    """
+    patterns = [
+        r'(\d+)\s*°\s*C',
+        r'(\d+)\s*(?:grados?\s*(?:centígrados?)?)',
+        r'(\d+)\s*celsius',
+        r'(\d+)\s*C(?:\s|$)',
+        r'temperatura\s+(?:de\s+)?(\d+)',
+        r'a\s+(\d+)\s*°?\s*C',
+    ]
+    for pat in patterns:
+        match = re.search(pat, query, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
 def search_similar(query: str, limit: int = 10) -> list:
     """
     Busca registros similares usando embedding similarity.
     Si la query menciona una temperatura, tambien busca por esa temperatura.
+    Si no menciona temperatura, incluye diversidad de temperaturas.
     
     Args:
         query: Pregunta del usuario
@@ -37,45 +59,90 @@ def search_similar(query: str, limit: int = 10) -> list:
     Returns:
         list: Lista de diccionarios con registros similares
     """
-    conn = get_connection()
-    cur = conn.cursor()
-    
-    # 1. Buscar por embedding similarity
-    query_embedding = get_embedding(query)
-    
-    cur.execute("""
-        SELECT 
-            id, article_title, doi, polymer, 
-            wvtr_value, wvtr_units, temperature, 
-            rh, thickness, test_method
-        FROM wvtr_data
-        ORDER BY embedding <-> %s
-        LIMIT %s
-    """, (str(query_embedding), limit))
-    
-    embedding_results = cur.fetchall()
-    
-    # 2. Detectar si se menciona una temperatura en la query
-    import re
-    temp_match = re.search(r'(\d+)\s*(?:grados?|°?C|celsius)', query, re.IGNORECASE)
-    temperature_results = []
-    
-    if temp_match:
-        temp_value = temp_match.group(1)
-        # Buscar registros con esa temperatura
+    conn = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        # 1. Buscar por embedding similarity (pedir más para tener margen)
+        query_embedding = get_embedding(query)
+        fetch_limit = limit * 2
+        
         cur.execute("""
             SELECT 
                 id, article_title, doi, polymer, 
                 wvtr_value, wvtr_units, temperature, 
                 rh, thickness, test_method
             FROM wvtr_data
-            WHERE temperature ILIKE %s
-        """, (f'%{temp_value}%',))
-        temperature_results = cur.fetchall()
+            WHERE embedding IS NOT NULL
+            ORDER BY embedding <-> %s
+            LIMIT %s
+        """, (str(query_embedding), fetch_limit))
+        
+        embedding_results = cur.fetchall()
+        
+        # 2. Detectar si se menciona una temperatura en la query
+        temp_value = _extract_temperature(query)
+        temperature_results = []
+        
+        if temp_value:
+            cur.execute("""
+                SELECT 
+                    id, article_title, doi, polymer, 
+                    wvtr_value, wvtr_units, temperature, 
+                    rh, thickness, test_method
+                FROM wvtr_data
+                WHERE temperature ILIKE %s
+            """, (f'%{temp_value}%',))
+            temperature_results = cur.fetchall()
+        
+        # 3. Si no se pidió temperatura explícita, asegurar diversidad
+        if not temp_value:
+            temps_in_results = set()
+            for row in embedding_results:
+                t = row[6]
+                if t:
+                    num = re.search(r'(\d+)', t)
+                    if num:
+                        temps_in_results.add(num.group(1))
+            
+            # Obtener todas las temperaturas disponibles en la BD
+            cur.execute("""
+                SELECT DISTINCT regexp_replace(temperature, '[^0-9]', '', 'g') as temp_num
+                FROM wvtr_data
+                WHERE temperature IS NOT NULL
+                  AND temperature != ''
+                  AND embedding IS NOT NULL
+            """)
+            all_db_temps = {row[0] for row in cur.fetchall() if row[0]}
+            
+            # Calcular temperaturas faltantes
+            missing_temps = all_db_temps - temps_in_results
+            
+            # Si faltan temperaturas, buscar registros de esas temperaturas
+            if missing_temps:
+                for mt in missing_temps:
+                    cur.execute("""
+                        SELECT 
+                            id, article_title, doi, polymer, 
+                            wvtr_value, wvtr_units, temperature, 
+                            rh, thickness, test_method
+                        FROM wvtr_data
+                        WHERE embedding IS NOT NULL
+                          AND temperature ILIKE %s
+                        ORDER BY embedding <-> %s
+                        LIMIT 2
+                    """, (f'%{mt}%', str(query_embedding)))
+                    
+                    for row in cur.fetchall():
+                        if row[0] not in {r[0] for r in temperature_results}:
+                            temperature_results.append(row)
+        
+        cur.close()
+    finally:
+        release_connection(conn)
     
-    release_connection(conn)
-    
-    # 3. Combinar resultados (evitar duplicados)
+    # 4. Combinar resultados (evitar duplicados)
     seen_ids = set()
     all_results = []
     
@@ -91,7 +158,7 @@ def search_similar(query: str, limit: int = 10) -> list:
             seen_ids.add(row[0])
             all_results.append(row)
     
-    # 4. Formatear resultados
+    # 5. Formatear resultados
     formatted = []
     for row in all_results[:limit]:
         formatted.append({
@@ -117,22 +184,26 @@ def get_db_stats() -> dict:
     Returns:
         dict: Estadísticas de la BD
     """
-    conn = get_connection()
-    cur = conn.cursor()
-    
-    cur.execute("SELECT COUNT(*) FROM wvtr_data")
-    total_records = cur.fetchone()[0]
-    
-    cur.execute("SELECT COUNT(DISTINCT polymer) FROM wvtr_data")
-    total_polymers = cur.fetchone()[0]
-    
-    cur.execute("SELECT COUNT(DISTINCT article_title) FROM wvtr_data")
-    total_articles = cur.fetchone()[0]
-    
-    cur.execute("SELECT COUNT(*) FROM wvtr_data WHERE doi IS NOT NULL")
-    records_with_doi = cur.fetchone()[0]
-    
-    release_connection(conn)
+    conn = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        cur.execute("SELECT COUNT(*) FROM wvtr_data")
+        total_records = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(DISTINCT polymer) FROM wvtr_data")
+        total_polymers = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(DISTINCT article_title) FROM wvtr_data")
+        total_articles = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM wvtr_data WHERE doi IS NOT NULL")
+        records_with_doi = cur.fetchone()[0]
+        
+        cur.close()
+    finally:
+        release_connection(conn)
     
     return {
         "total_records": total_records,

@@ -7,7 +7,7 @@ name = "wvtr-extraction"
 version = "1.2.0"
 description = "Automated Water Vapor Transmission Rate Data Extraction from Polymer Science Literature"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 authors = [
     {name = "Sebastian Sabogal", email = "ssabogal@institution.edu"}
@@ -16,7 +16,7 @@ keywords = ["polymer", "wvtr", "rag", "llm", "extraction", "packaging"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -36,6 +36,18 @@ dependencies = [
     "psycopg2-binary>=2.9.0",
     "pgvector>=0.2.0",
     
+    # PDF to Markdown
+    "opendataloader-pdf>=0.1.0",
+
+    # Cloud Storage
+    "boto3>=1.28.0",
+
+    # Async support
+    "nest-asyncio>=1.5.0",
+
+    # UI
+    "streamlit>=1.28.0",
+
     # Utils
     "python-dotenv>=1.0.0",
 ]

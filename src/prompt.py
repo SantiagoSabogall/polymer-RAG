@@ -51,8 +51,6 @@ SYSTEM_PROMPT = """You are a scientific data extraction engine specialized in po
       "rh": "90%",
       "thickness": "15 μm",
       "test_method": "ASTM F1249"
-      "title": "Barrier Properties of EVOH Films for Food Packaging",
-      "doi": "10.1016/j.polymer.2020.123456"
     }
   ]
 }

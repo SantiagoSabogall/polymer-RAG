@@ -7,7 +7,7 @@ y métricas de rendimiento.
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class StructuredLogger:
     def log_event(self, event_type, data):
         """Log en formato JSON estructurado."""
         event = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "event_type": event_type,
             "data": data
         }
@@ -104,11 +104,11 @@ class PerformanceMetrics:
     
     def start_phase(self, phase):
         """Registra el inicio de una fase."""
-        self.metrics[phase]["start"] = datetime.utcnow()
+        self.metrics[phase]["start"] = datetime.now(timezone.utc)
     
     def end_phase(self, phase):
         """Registra el fin de una fase."""
-        self.metrics[phase]["end"] = datetime.utcnow()
+        self.metrics[phase]["end"] = datetime.now(timezone.utc)
     
     def increment(self, phase, metric):
         """Incrementa un contador en una fase."""

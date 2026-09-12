@@ -7,6 +7,11 @@ from config import PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD
 
 logger = logging.getLogger(__name__)
 
+
+class DatabaseError(Exception):
+    pass
+
+
 # ============================================
 # CONNECTION POOLING
 # ============================================
@@ -43,10 +48,6 @@ def release_connection(conn):
     global connection_pool
     if connection_pool and conn:
         connection_pool.putconn(conn)
-
-
-class DatabaseError(Exception):
-    pass
 
 
 def insert_wvtr(conn, article_title, doi, pdf_url, llm_result, raw_json):

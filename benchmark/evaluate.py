@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 
 BENCHMARK_DIR = os.path.dirname(__file__)
 RESULTS_FILE = os.path.join(BENCHMARK_DIR, "results.json")
@@ -161,6 +160,9 @@ def run_evaluation():
             scores["cost"] = entry.get("cost", 0)
             scores["latency"] = entry.get("latency", 0)
             model_scores.append(scores)
+
+        if not model_scores:
+            continue
 
         avg = {
             "json_valid_rate": sum(s["json_valid"] for s in model_scores) / len(model_scores),

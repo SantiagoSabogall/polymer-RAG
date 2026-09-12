@@ -13,5 +13,14 @@ pgvector>=0.2.0
 # UI
 streamlit>=1.28.0
 
+# PDF to Markdown
+opendataloader-pdf>=0.1.0
+
+# Cloud Storage
+boto3>=1.28.0
+
+# Async support
+nest-asyncio>=1.5.0
+
 # Utils
 python-dotenv>=1.0.0

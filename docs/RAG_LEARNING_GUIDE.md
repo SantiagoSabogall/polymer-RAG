@@ -729,58 +729,19 @@ if __name__ == "__main__":
 
 ## 6. Probar el Sistema
 
-### 6.1 Script de Prueba: `scripts/test_rag.py`
+### 6.1 Probar la API
 
-```python
-"""
-test_rag.py - Pruebas del sistema RAG
-======================================
-Ejecutar: python scripts/test_rag.py
-"""
+```bash
+# Ejecutar la API
+python api/server.py
 
-import sys
-sys.path.insert(0, 'src')
+# Probar health check
+curl http://localhost:8001/health
 
-from rag import rag_query, search_similar
-
-def test_search():
-    """Prueba la búsqueda de registros."""
-    print("=" * 60)
-    print("PRUEBA 1: Búsqueda de registros")
-    print("=" * 60)
-    
-    results = search_similar("PBAT", limit=3)
-    
-    print(f"\nResultados encontrados: {len(results)}")
-    for i, r in enumerate(results, 1):
-        print(f"\n{i}. {r['polymer']}")
-        print(f"   WVTR: {r['wvtr_value']} {r['wvtr_units']}")
-        print(f"   Fuente: {r['article_title'][:50]}...")
-
-def test_rag():
-    """Prueba la consulta RAG completa."""
-    print("\n" + "=" * 60)
-    print("PRUEBA 2: Consulta RAG completa")
-    print("=" * 60)
-    
-    questions = [
-        "¿Cuál es el WVTR del PBAT?",
-        "¿Qué polímeros tienen mejor barrera que LDPE?",
-        "Compara PHBV con PHBV/clay nanocomposite"
-    ]
-    
-    for question in questions:
-        print(f"\nPregunta: {question}")
-        print("-" * 40)
-        
-        result = rag_query(question)
-        
-        print(f"\nRespuesta:\n{result['answer']}")
-        print(f"\nFuentes: {len(result['sources'])} registros")
-
-if __name__ == "__main__":
-    test_search()
-    test_rag()
+# Probar query RAG
+curl -X POST http://localhost:8001/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "¿Cuál es el WVTR del PBAT?", "limit": 5}'
 ```
 
 ---
@@ -946,8 +907,8 @@ print(f"Registros con embedding: {count}")
 | `src/embeddings.py` | Generación de embeddings |
 | `src/rag.py` | Motor RAG completo |
 | `api/server.py` | API REST |
-| `scripts/setup_pgvector.sql` | Configuración pgvector |
-| `scripts/test_rag.py` | Pruebas del sistema |
+| `docker/init.sql` | Configuración pgvector |
+| `scripts/generate_embeddings.py` | Generación de embeddings |
 
 ### Dependencias
 
@@ -961,8 +922,8 @@ openai>=1.3.0
 ### Comandos Útiles
 
 ```bash
-# Configurar pgvector
-psql -U postgres -d polymers_wvtr -f scripts/setup_pgvector.sql
+# Configurar pgvector (via Docker)
+docker compose up -d
 
 # Generar embeddings
 python scripts/generate_embeddings.py
@@ -971,7 +932,9 @@ python scripts/generate_embeddings.py
 python api/server.py
 
 # Probar RAG
-python scripts/test_rag.py
+curl -X POST http://localhost:8001/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "¿Cuál es el WVTR del PBAT?"}'
 ```
 
 ---

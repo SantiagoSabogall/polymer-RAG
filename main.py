@@ -6,13 +6,13 @@ import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, "src")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from cloudfareR2 import get_s3_client, list_pdfs, download_pdf, R2ConnectionError, DownloadError
 from pdf_to_markdown import pdf_to_markdown, ConversionError
 from clean_markdown import extract_doi, clean_markdown, CleanError
 from llm import get_client, extract_wvtr_with_retry, LLMError
-from database import get_connection, insert_wvtr, get_stats, DatabaseError
+from database import get_connection, insert_wvtr, get_stats, release_connection, DatabaseError
 
 # ============================================
 # CONFIGURACIÓN
@@ -69,13 +69,18 @@ def save_errors(errors):
             json.dump(errors, f, indent=2)
 
 
+errors_lock = threading.Lock()
+
+
 def add_error(errors, pdf_key, error_type, error_msg):
-    errors.append({
+    entry = {
         "pdf_key": pdf_key,
         "error_type": error_type,
         "error_msg": str(error_msg),
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-    })
+    }
+    with errors_lock:
+        errors.append(entry)
 
 
 def load_dois():
@@ -341,7 +346,7 @@ def main():
                 continue
 
         stats = get_stats(conn)
-        conn.close()
+        release_connection(conn)
 
         print(f"Registros insertados: {total_inserted}")
         print(f"Total en BD: {stats['total_registros']}")

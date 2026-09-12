@@ -27,9 +27,22 @@ def get_s3_client():
 
 def list_pdfs(s3_client):
     try:
-        response = s3_client.list_objects_v2(Bucket=R2_BUCKET_NAME)
-        contents = response.get("Contents", [])
-        pdfs = [obj["Key"] for obj in contents if obj["Key"].endswith(".pdf")]
+        pdfs = []
+        continuation_token = None
+
+        while True:
+            kwargs = {"Bucket": R2_BUCKET_NAME}
+            if continuation_token:
+                kwargs["ContinuationToken"] = continuation_token
+
+            response = s3_client.list_objects_v2(**kwargs)
+            contents = response.get("Contents", [])
+            pdfs.extend(obj["Key"] for obj in contents if obj["Key"].endswith(".pdf"))
+
+            if not response.get("IsTruncated"):
+                break
+            continuation_token = response.get("NextContinuationToken")
+
         return pdfs
     except Exception as e:
         raise R2ConnectionError(f"Error listando PDFs en R2: {e}")

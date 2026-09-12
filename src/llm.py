@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 5
 BASE_DELAY = 10
 DELAY_BETWEEN_REQUESTS = 3
-MODEL = "openai/gpt-4.1-nano"
+MODEL = "openai/gpt-5.6-luna"
 
 
 class LLMError(Exception):

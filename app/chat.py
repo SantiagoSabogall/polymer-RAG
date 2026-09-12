@@ -137,10 +137,37 @@ Preguntame sobre datos de **Water Vapor Transmission Rate (WVTR)** de polimeros.
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Inicializar pregunta pendiente
+if "pending_question" not in st.session_state:
+    st.session_state.pending_question = None
+
 # Mostrar mensajes anteriores
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+
+# ============================================
+# PROCESAR PREGUNTA PENDIENTE (de botones sugeridos)
+# ============================================
+
+if st.session_state.pending_question:
+    prompt = st.session_state.pending_question
+    st.session_state.pending_question = None
+
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Buscando en la base de datos..."):
+            try:
+                result = rag_query(prompt)
+                response = result["answer"]
+                st.markdown(response)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+            except Exception as e:
+                error_msg = f"Error al procesar tu pregunta: {str(e)}"
+                st.error(error_msg)
+                st.session_state.messages.append({"role": "assistant", "content": error_msg})
 
 # ============================================
 # MENSAJE DE BIENVENIDA + PREGUNTAS SUGERIDAS
@@ -168,6 +195,7 @@ Puedo ayudarte a:
             col = cols[i % 2]
             if col.button(question, key=f"suggest_{i}", use_container_width=True):
                 st.session_state.messages.append({"role": "user", "content": question})
+                st.session_state.pending_question = question
                 st.rerun()
 
 # ============================================
