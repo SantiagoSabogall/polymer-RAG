@@ -97,53 +97,61 @@ pip install -e ".[all]"       # + everything
 
 ### 2.5 Configure Environment
 
-Create `API_KEY.env` in the project root:
+The project uses **two configuration files**:
 
-```env
-# OpenRouter API Key
-OPENROUTE_API=sk-or-v1-your-api-key-here
+#### `.env` — Docker Compose (PostgreSQL)
 
-# Cloudflare R2 Credentials
-R2_ACCESS_KEY=your-r2-access-key
-R2_SECRET_KEY=your-r2-secret-key
-R2_ENDPOINT=https://your-account.r2.cloudflarestorage.com
-R2_BUCKET_NAME=your-bucket-name
-
-# PostgreSQL Credentials
-PG_HOST=localhost
-PG_DATABASE=polymers_wvtr
-PG_USER=postgres
-PG_PASSWORD=your-password
+```bash
+cp .env.example .env
+nano .env
 ```
 
-### 2.6 Initialize Database
+```env
+PG_DATABASE=polymers_wvtr
+PG_USER=postgres
+PG_PASSWORD=your_password_here
+```
 
-```sql
--- Connect to PostgreSQL and create database
-CREATE DATABASE polymers_wvtr;
+#### `API_KEY.env` — Python (API keys + credentials)
 
--- Connect to the database and create table
-\c polymers_wvtr
+```bash
+cp API_KEY.env.example API_KEY.env
+nano API_KEY.env
+```
 
-CREATE TABLE wvtr_data (
-    id SERIAL PRIMARY KEY,
-    article_title TEXT,
-    doi TEXT,
-    polymer TEXT,
-    wvtr_value FLOAT,
-    wvtr_units TEXT,
-    temperature TEXT,
-    rh TEXT,
-    thickness TEXT,
-    test_method TEXT,
-    pdf_url TEXT,
-    raw_json JSONB,
-    created_at TIMESTAMP DEFAULT NOW()
-);
+```env
+# OpenRouter (LLM access)
+OPENROUTE_API=sk-or-v1-your-key-here
 
--- Create index for DOI lookups
-CREATE INDEX idx_wvtr_doi ON wvtr_data(doi);
-CREATE INDEX idx_wvtr_polymer ON wvtr_data(polymer);
+# Cloudflare R2 (PDF storage)
+R2_ACCESS_KEY=your_r2_access_key
+R2_SECRET_KEY=your_r2_secret_key
+R2_ENDPOINT=https://your-account-id.r2.cloudflarestorage.com
+R2_BUCKET_NAME=your-bucket-name
+
+# PostgreSQL (same password as .env)
+PG_HOST=localhost
+PG_PORT=5433
+PG_DATABASE=polymers_wvtr
+PG_USER=postgres
+PG_PASSWORD=your_password_here
+```
+
+### 2.6 Start Infrastructure
+
+```bash
+docker compose up -d
+```
+
+This starts:
+- **PostgreSQL** (port 5433) with pgvector extension and auto-initialized schema
+- **Adminer** (port 8080) for web-based database exploration
+
+Verify both services are running:
+
+```bash
+docker ps
+# Should show: wvtr-postgres and wvtr-adminer
 ```
 
 ---
@@ -163,49 +171,88 @@ This executes:
 2. **Phase 2**: Extract WVTR data using GPT-5.6 Luna
 3. **Phase 3**: Insert results into PostgreSQL
 
-### 3.2 Benchmark Models
+### 3.2 Generate Embeddings
+
+After the pipeline completes, generate vector embeddings for RAG search:
+
+```bash
+python scripts/generate_embeddings.py
+```
+
+### 3.3 Explore Data
+
+#### Adminer (Web Interface)
+
+Open [http://localhost:8080](http://localhost:8080) and login:
+
+| Field | Value |
+|-------|-------|
+| System | PostgreSQL |
+| Server | postgres |
+| Username | postgres |
+| Password | (your PG_PASSWORD) |
+| Database | polymers_wvtr |
+
+From there you can:
+- Browse tables and data
+- Run SQL queries
+- Export data to CSV/JSON
+- Edit records directly
+
+#### Python Script
+
+```bash
+python benchmark/explore_db.py
+python benchmark/explore_db.py --export
+python benchmark/explore_db.py --search PBAT
+```
+
+### 3.4 Use the System
+
+#### Chat Interface (Streamlit)
+
+```bash
+streamlit run app/chat.py
+# Open http://localhost:8501
+```
+
+#### API REST
+
+```bash
+python api/server.py &
+# Open http://localhost:8001/docs for Swagger UI
+```
+
+```bash
+# Query example
+curl -X POST http://localhost:8001/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "¿Cuál es el WVTR del PBAT?", "limit": 5}'
+```
+
+### 3.5 Benchmark Models
 
 Compare extraction performance across multiple LLMs:
 
 ```bash
-# DeepSeek V4 Flash
-python benchmark/test_7.py
-
-# GPT-5.6 Luna
-python benchmark/test_gpt56.py
-
-# Gemini 3.8 Flash
-python benchmark/test_gemini38.py
-
-# GLM-5.3 Flash
-python benchmark/test_glm53.py
+python benchmark/run_model.py openai/gpt-5.6-luna
+python benchmark/run_model.py deepseek/deepseek-v4-flash-0731
+python benchmark/run_model.py google/gemini-3.8-flash
+python benchmark/run_model.py z-ai/glm-5.3-flash
 
 # Generate comparison Excel
 python benchmark/generate_excel.py
 ```
 
-### 3.3 Database Exploration
+### 3.6 Services Summary
 
-```bash
-# Python exploration script
-python benchmark/explore_db.py
-python benchmark/explore_db.py --export
-python benchmark/explore_db.py --search PBAT
-
-# SQL exploration
-psql -U postgres -d polymers_wvtr -f benchmark/explore.sql
-```
-
-### 3.4 DBeaver Connection
-
-1. Open DBeaver → New Database Connection → PostgreSQL
-2. Configure:
-   - Host: `localhost`
-   - Port: `5433`
-   - Database: `polymers_wvtr`
-   - User: `postgres`
-   - Password: `your-password`
-3. Click "Test Connection" → "Finish"
+| Port | Service | URL |
+|------|---------|-----|
+| 5433 | PostgreSQL | `localhost:5433` |
+| 8080 | Adminer | [http://localhost:8080](http://localhost:8080) |
+| 8001 | API REST | [http://localhost:8001](http://localhost:8001) |
+| 8001/docs | Swagger | [http://localhost:8001/docs](http://localhost:8001/docs) |
+| 8501 | Streamlit | [http://localhost:8501](http://localhost:8501) |
 
 ---
 
@@ -243,7 +290,7 @@ psql -U postgres -d polymers_wvtr -f benchmark/explore.sql
 ### 4.2 Directory Structure
 
 ```
-wvtr-extraction/
+polymer-RAG/
 ├── src/                          # Source modules
 │   ├── config.py                 # Configuration management
 │   ├── cloudfareR2.py            # Cloudflare R2 integration
@@ -252,20 +299,31 @@ wvtr-extraction/
 │   ├── prompt.py                 # LLM prompts
 │   ├── llm.py                    # LLM interaction utilities
 │   ├── database.py               # PostgreSQL with pooling
+│   ├── embeddings.py             # Embedding generation
+│   ├── rag.py                    # RAG engine (search + generation)
 │   └── monitoring.py             # Structured logging & metrics
+├── api/                          # REST API
+│   └── server.py                 # FastAPI server
+├── app/                          # Web UI
+│   └── chat.py                   # Streamlit chat interface
+├── scripts/                      # Utility scripts
+│   └── generate_embeddings.py    # Batch embedding generation
 ├── benchmark/                    # Benchmarking tools
-│   ├── test_7.py                 # DeepSeek benchmark
-│   ├── test_gpt56.py             # GPT-5.6 benchmark
-│   ├── test_gemini38.py          # Gemini benchmark
-│   ├── test_glm53.py             # GLM benchmark
-│   ├── run_benchmark.py          # Multi-model benchmark
+│   ├── run_model.py              # Unified benchmark runner
 │   ├── evaluate.py               # Ground truth evaluation
 │   ├── generate_excel.py         # Excel report generator
 │   ├── explore_db.py             # Database exploration
-│   └── explore.sql               # SQL queries
+│   └── papers/                   # Benchmark PDF papers
+├── docker/                       # Docker configuration
+│   ├── init.sql                  # Database schema initialization
+│   └── Dockerfile.postgres       # Custom PostgreSQL image
 ├── main_test.py                  # Main pipeline entry point
 ├── main.py                       # Alternative pipeline
-├── API_KEY.env                   # Environment variables (gitignored)
+├── docker-compose.yml            # Docker services
+├── .env                          # Docker variables (gitignored)
+├── API_KEY.env                   # Python credentials (gitignored)
+├── .env.example                  # Docker template
+├── API_KEY.env.example           # Python template
 └── README.md                     # This file
 ```
 
@@ -426,7 +484,7 @@ If you use this software in your research, please cite:
   author = {Sabogal, Sebastian},
   title = {WVTR Extraction Pipeline: Automated Water Vapor Transmission Rate Data Extraction},
   year = {2026},
-  url = {https://github.com/your-username/wvtr-extraction}
+  url = {https://github.com/SantiagoSabogall/polymer-RAG}
 }
 ```
 
@@ -436,8 +494,7 @@ If you use this software in your research, please cite:
 
 For questions or collaborations:
 
-- **Email**: your-email@institution.edu
-- **GitHub**: https://github.com/your-username
+- **GitHub**: https://github.com/SantiagoSabogall
 
 ---
 
