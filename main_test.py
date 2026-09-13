@@ -40,6 +40,9 @@ from monitoring import StructuredLogger, CostTracker, PerformanceMetrics
 # ============================================
 # LOGGING
 # ============================================
+# Crear directorio temporal antes de configurar el logger
+Path("temp").mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
