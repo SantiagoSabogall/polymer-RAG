@@ -3,8 +3,12 @@ import re
 import time
 import logging
 from openai import OpenAI
-from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
-from prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+try:
+    from .config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
+    from .prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+except ImportError:
+    from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
+    from prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)

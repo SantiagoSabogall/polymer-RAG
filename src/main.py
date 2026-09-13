@@ -12,8 +12,12 @@ from pathlib import Path
 # Agregar directorio src al path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from cloudfareR2 import get_s3_client, list_pdfs, download_pdf
-from pdf_to_markdown import pdf_to_markdown
+try:
+    from .cloudfareR2 import get_s3_client, list_pdfs, download_pdf
+    from .pdf_to_markdown import pdf_to_markdown
+except ImportError:
+    from cloudfareR2 import get_s3_client, list_pdfs, download_pdf
+    from pdf_to_markdown import pdf_to_markdown
 
 
 def main():

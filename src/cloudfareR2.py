@@ -1,6 +1,9 @@
 import boto3
 from pathlib import Path
-from config import R2_ACCESS_KEY, R2_BUCKET_NAME, R2_ENDPOINT, R2_SECRET_KEY
+try:
+    from .config import R2_ACCESS_KEY, R2_BUCKET_NAME, R2_ENDPOINT, R2_SECRET_KEY
+except ImportError:
+    from config import R2_ACCESS_KEY, R2_BUCKET_NAME, R2_ENDPOINT, R2_SECRET_KEY
 
 
 class R2ConnectionError(Exception):

@@ -8,7 +8,10 @@ Modelo: text-embedding-3-small (1536 dimensiones)
 """
 
 from openai import OpenAI
-from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
+try:
+    from .config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
+except ImportError:
+    from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
 
 
 # Cliente de OpenAI para generar embeddings

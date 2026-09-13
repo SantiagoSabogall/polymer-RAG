@@ -3,7 +3,10 @@ import logging
 import psycopg2
 from psycopg2 import pool
 from psycopg2.extras import execute_values
-from config import PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD
+try:
+    from .config import PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD
+except ImportError:
+    from config import PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD
 
 logger = logging.getLogger(__name__)
 

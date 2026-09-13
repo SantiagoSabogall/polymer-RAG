@@ -10,9 +10,14 @@ Pregunta → Embedding → Búsqueda → Contexto → LLM → Respuesta
 
 import re
 from openai import OpenAI
-from database import get_connection, release_connection
-from embeddings import get_embedding, generate_record_text
-from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
+try:
+    from .database import get_connection, release_connection
+    from .embeddings import get_embedding, generate_record_text
+    from .config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
+except ImportError:
+    from database import get_connection, release_connection
+    from embeddings import get_embedding, generate_record_text
+    from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
 
 
 # Cliente LLM para generar respuestas

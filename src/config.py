@@ -21,7 +21,7 @@ R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
 
 PG_CONNECTION = os.getenv("PG_CONNECTION")
 PG_HOST = os.getenv("PG_HOST")
-PG_PORT = os.getenv("PG_PORT", "5432")
+PG_PORT = os.getenv("PG_PORT", "5433")
 
 PG_DATABASE = os.getenv("PG_DATABASE")
 PG_USER = os.getenv("PG_USER")
