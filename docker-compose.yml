@@ -3,13 +3,13 @@ services:
     image: pgvector/pgvector:pg18
     container_name: wvtr-postgres
     environment:
-      POSTGRES_DB: polymers_wvtr
-      POSTGRES_USER: postgres
+      POSTGRES_DB: ${PG_DATABASE}
+      POSTGRES_USER: ${PG_USER}
       POSTGRES_PASSWORD: ${PG_PASSWORD}
     ports:
       - "5433:5432"
     volumes:
-      - pgdata:/var/lib/postgresql
+      - pgdata:/var/lib/postgresql/data
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
     restart: unless-stopped
 
