@@ -2,8 +2,6 @@ services:
   postgres:
     image: pgvector/pgvector:pg18
     container_name: wvtr-postgres
-    env_file:
-      - API_KEY.env
     environment:
       POSTGRES_DB: polymers_wvtr
       POSTGRES_USER: postgres
