@@ -11,16 +11,22 @@ Pipeline:
 Autor: Sebastian Sabogal
 """
 
-import sys
-import os
 import asyncio
 import json
-import time
 import logging
+import os
+import platform
+import sys
 import threading
-from pathlib import Path
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
 from openai import AsyncOpenAI
+
+# Fix Windows asyncio ProactorEventLoop compatibility with httpx/openai
+if platform.system() == "Windows":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # ============================================
 # CONFIGURACIÓN DE PATHS
@@ -28,14 +34,20 @@ from openai import AsyncOpenAI
 # Agrega src/ al path para importar módulos del proyecto
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
+from clean_markdown import CleanError, clean_markdown, extract_doi
+from cloudfareR2 import DownloadError, R2ConnectionError, download_pdf, get_s3_client, list_pdfs
 from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
-from prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+from database import (
+    DatabaseError,
+    get_connection,
+    get_stats,
+    insert_wvtr,
+    is_already_processed,
+)
 from llm import parse_llm_json
-from cloudfareR2 import get_s3_client, list_pdfs, download_pdf, R2ConnectionError, DownloadError
-from pdf_to_markdown import pdf_to_markdown, ConversionError
-from clean_markdown import extract_doi, clean_markdown, CleanError
-from database import get_connection, insert_wvtr, get_stats, DatabaseError, is_already_processed, release_connection
-from monitoring import StructuredLogger, CostTracker, PerformanceMetrics
+from monitoring import PerformanceMetrics, StructuredLogger
+from pdf_to_markdown import ConversionError, pdf_to_markdown
+from prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 # ============================================
 # LOGGING
@@ -487,7 +499,14 @@ async def run_phase_2(dois: dict) -> list:
         process_file(client, semaphore, md, doi_map.get(md.stem), total)
         for md in md_files
     ]
-    results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Manejar excepciones que no fueron capturadas dentro de process_file
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            logger.error(f"[FAIL] {md_files[i].name}: {r}")
+            llm_stats["errors"] += 1
+            results[i] = {"file": md_files[i].name, "error": str(r)}
 
     total_latency = time.time() - llm_stats["start_time"]
 
@@ -563,9 +582,9 @@ def run_phase_3(llm_results: list, dois: dict) -> dict:
         stats = get_stats(conn)
         conn.close()
 
-        logger.info(f"")
+        logger.info("")
         logger.info(f"{'='*50}")
-        logger.info(f"RESUMEN FASE 3 - PostgreSQL")
+        logger.info("RESUMEN FASE 3 - PostgreSQL")
         logger.info(f"{'='*50}")
         logger.info(f"Registros insertados: {total_inserted}")
         logger.info(f"Errores de inserción: {errors_count}")
@@ -597,7 +616,6 @@ def main():
 
     # Inicializar monitoreo
     structured_logger = StructuredLogger("pipeline")
-    cost_tracker = CostTracker()
     performance_metrics = PerformanceMetrics()
 
     logger.info("=" * 50)
@@ -697,12 +715,4 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except RuntimeError as e:
-        if "cannot be called when another loop is running" in str(e):
-            import nest_asyncio
-            nest_asyncio.apply()
-            main()
-        else:
-            raise
+    main()
