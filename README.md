@@ -61,6 +61,7 @@ h1, h2, h3 { font-family: 'Lora', serif; }
 ### 2.1 Prerequisites
 
 - Python 3.10 or higher
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (package manager)
 - Docker + Docker Compose
 - Cloudflare R2 account (for PDF storage)
 - OpenRouter API key (for LLM access)
@@ -72,28 +73,31 @@ git clone https://github.com/SantiagoSabogall/polymer-RAG.git
 cd polymer-RAG
 ```
 
-### 2.3 Create Virtual Environment
+### 2.3 Install Dependencies
 
 ```bash
-python -m venv venv
-source venv/bin/activate  # Linux/macOS
-# or
-venv\Scripts\activate  # Windows
+uv sync
 ```
 
-### 2.4 Install Dependencies
+This creates a virtual environment and installs all dependencies. Optional extras:
 
 ```bash
-pip install -e .
+uv sync --extra dev       # + testing/linting tools
+uv sync --extra benchmark # + Excel export
+uv sync --all-extras      # + everything
 ```
 
-This installs all dependencies and the project itself. Optional extras:
+### 2.4 Available Commands
 
-```bash
-pip install -e ".[dev]"      # + testing/linting tools
-pip install -e ".[benchmark]" # + Excel export
-pip install -e ".[all]"       # + everything
-```
+After installation, you can run:
+
+| Command | Description |
+|---------|-------------|
+| `uv run pipeline` | Run the complete extraction pipeline |
+| `uv run api-server` | Start the REST API server |
+| `uv run embeddings` | Generate vector embeddings |
+| `uv run benchmark-run <model>` | Run benchmark with specific model |
+| `uv run streamlit run app/chat.py` | Start Streamlit chat interface |
 
 ### 2.5 Configure Environment
 
@@ -163,7 +167,9 @@ docker ps
 Process all PDFs from Cloudflare R2 through the entire pipeline:
 
 ```bash
-python main_test.py
+uv run pipeline
+# or
+uv run python main.py
 ```
 
 This executes:
@@ -176,7 +182,9 @@ This executes:
 After the pipeline completes, generate vector embeddings for RAG search:
 
 ```bash
-python scripts/generate_embeddings.py
+uv run embeddings
+# or
+uv run python scripts/generate_embeddings.py
 ```
 
 ### 3.3 Explore Data
@@ -212,14 +220,14 @@ python benchmark/explore_db.py --search PBAT
 #### Chat Interface (Streamlit)
 
 ```bash
-streamlit run app/chat.py
+uv run streamlit run app/chat.py
 # Open http://localhost:8501
 ```
 
 #### API REST
 
 ```bash
-python api/server.py &
+uv run api-server &
 # Open http://localhost:8001/docs for Swagger UI
 ```
 
@@ -235,13 +243,13 @@ curl -X POST http://localhost:8001/query \
 Compare extraction performance across multiple LLMs:
 
 ```bash
-python benchmark/run_model.py openai/gpt-5.6-luna
-python benchmark/run_model.py deepseek/deepseek-v4-flash-0731
-python benchmark/run_model.py google/gemini-3.8-flash
-python benchmark/run_model.py z-ai/glm-5.3-flash
+uv run benchmark-run openai/gpt-5.6-luna
+uv run benchmark-run deepseek/deepseek-v4-flash-0731
+uv run benchmark-run google/gemini-3.8-flash
+uv run benchmark-run z-ai/glm-5.3-flash
 
 # Generate comparison Excel
-python benchmark/generate_excel.py
+uv run python benchmark/generate_excel.py
 ```
 
 ### 3.6 Services Summary
@@ -418,13 +426,13 @@ ORDER BY wvtr_value;
 Dependencies are managed via `pyproject.toml`. To install:
 
 ```bash
-pip install -e .
+uv sync
 ```
 
 To update dependencies after modifying `pyproject.toml`:
 
 ```bash
-pip install -e .
+uv sync
 ```
 
 ### 8.2 Data Versioning

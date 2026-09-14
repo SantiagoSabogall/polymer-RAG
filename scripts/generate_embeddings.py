@@ -86,7 +86,7 @@ def verify_embeddings():
     print(f"Sin embedding: {without_embeddings}")
 
 
-if __name__ == "__main__":
+def main():
     print("=" * 50)
     print("GENERACIÓN DE EMBEDDINGS")
     print("=" * 50)
@@ -99,3 +99,7 @@ if __name__ == "__main__":
     
     print("\nEstado final:")
     verify_embeddings()
+
+
+if __name__ == "__main__":
+    main()

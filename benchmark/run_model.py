@@ -208,20 +208,25 @@ async def main(model):
     logger.info(f"{'='*50}")
 
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Uso: python benchmark/run_model.py <model>")
-        print("Ejemplos:")
-        print("  python benchmark/run_model.py deepseek/deepseek-v4-flash-0731")
-        print("  python benchmark/run_model.py openai/gpt-5.6-luna")
-        print("  python benchmark/run_model.py google/gemini-3.8-flash")
-        print("  python benchmark/run_model.py z-ai/glm-5.3-flash")
-        sys.exit(1)
-
-    model = sys.argv[1]
+def main(model=None):
+    if model is None:
+        if len(sys.argv) < 2:
+            print("Uso: benchmark-run <model>")
+            print("Ejemplos:")
+            print("  benchmark-run deepseek/deepseek-v4-flash-0731")
+            print("  benchmark-run openai/gpt-5.6-luna")
+            print("  benchmark-run google/gemini-3.8-flash")
+            print("  benchmark-run z-ai/glm-5.3-flash")
+            sys.exit(1)
+        model = sys.argv[1]
+    
     try:
         asyncio.run(main(model))
     except RuntimeError:
         import nest_asyncio
         nest_asyncio.apply()
         asyncio.get_event_loop().run_until_complete(main(model))
+
+
+if __name__ == "__main__":
+    main()
