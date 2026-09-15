@@ -33,7 +33,7 @@ def download_and_convert(max_papers=7):
             download_pdf(s3, pdf_key, local_pdf)
             md_path = pdf_to_markdown(local_pdf, TEMP_MD)
 
-            with open(md_path, "r") as f:
+            with open(md_path, "r", encoding="utf-8", errors="replace") as f:
                 raw_md = f.read()
 
             doi = extract_doi(raw_md)
@@ -41,7 +41,7 @@ def download_and_convert(max_papers=7):
 
             nombre_md = Path(md_path).stem
             final_path = os.path.join(BENCHMARK_PAPERS, f"{nombre_md}.md")
-            with open(final_path, "w") as f:
+            with open(final_path, "w", encoding="utf-8") as f:
                 f.write(cleaned_md)
 
             print(f"OK (DOI: {doi or 'N/A'})")

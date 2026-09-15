@@ -1,3 +1,4 @@
+import argparse
 import sys
 import os
 import json
@@ -8,11 +9,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from cloudfareR2 import get_s3_client, list_pdfs, download_pdf, R2ConnectionError, DownloadError
+from cloudfareR2 import get_s3_client, list_pdf_objects, download_pdf, R2ConnectionError, DownloadError
 from pdf_to_markdown import pdf_to_markdown, ConversionError
 from clean_markdown import extract_doi, clean_markdown, CleanError
 from llm import get_client, extract_wvtr_with_retry, LLMError
-from database import get_connection, insert_wvtr, get_stats, release_connection, DatabaseError
+from database import (
+    get_connection, get_stats, release_connection, DatabaseError,
+    ensure_schema, replace_document, prune_stale,
+)
+from sync_state import (
+    migrate_legacy, diff, mark_completed, mark_failed, adopt, mark_pruned,
+    completed_keys, failed_keys,
+)
 
 # ============================================
 # CONFIGURACIÓN
@@ -45,28 +53,30 @@ def ensure_dirs():
 
 def load_progress():
     if os.path.exists(PROGRESS_FILE):
-        with open(PROGRESS_FILE, "r") as f:
-            return json.load(f)
-    return {"total_pdfs": 0, "last_batch": 0, "last_index": 0, "completed": [], "failed": []}
+        with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        dois = load_dois()
+        return migrate_legacy(raw, dois)
+    return {"version": 2, "total_pdfs": 0, "last_batch": 0, "last_index": 0, "files": {}}
 
 
 def save_progress(progress):
     with file_lock:
-        with open(PROGRESS_FILE, "w") as f:
-            json.dump(progress, f, indent=2)
+        with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
+            json.dump(progress, f, indent=2, ensure_ascii=False)
 
 
 def load_errors():
     if os.path.exists(ERRORS_FILE):
-        with open(ERRORS_FILE, "r") as f:
+        with open(ERRORS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return []
 
 
 def save_errors(errors):
     with file_lock:
-        with open(ERRORS_FILE, "w") as f:
-            json.dump(errors, f, indent=2)
+        with open(ERRORS_FILE, "w", encoding="utf-8") as f:
+            json.dump(errors, f, indent=2, ensure_ascii=False)
 
 
 errors_lock = threading.Lock()
@@ -85,38 +95,81 @@ def add_error(errors, pdf_key, error_type, error_msg):
 
 def load_dois():
     if os.path.exists(DOIS_FILE):
-        with open(DOIS_FILE, "r") as f:
+        with open(DOIS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 
 def save_dois(dois):
     with file_lock:
-        with open(DOIS_FILE, "w") as f:
-            json.dump(dois, f, indent=2)
+        with open(DOIS_FILE, "w", encoding="utf-8") as f:
+            json.dump(dois, f, indent=2, ensure_ascii=False)
 
 
 def load_llm_results():
     if os.path.exists(LLM_RESULTS_FILE):
-        with open(LLM_RESULTS_FILE, "r") as f:
+        with open(LLM_RESULTS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return []
 
 
 def save_llm_results(results):
     with file_lock:
-        with open(LLM_RESULTS_FILE, "w") as f:
+        with open(LLM_RESULTS_FILE, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
 
 
-def add_llm_result(results, pdf_key, doi, llm_result):
+def add_llm_result(results, pdf_key, doi, etag, llm_result):
+    # Reemplaza entrada previa del mismo pdf_key (idempotente)
+    results[:] = [r for r in results if r.get("pdf_key") != pdf_key]
     results.append({
         "pdf_key": pdf_key,
         "doi": doi,
+        "etag": etag,
         "article_title": llm_result.get("article_title"),
         "registros": llm_result.get("registros", []),
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
     })
+
+
+def cleaned_md_path(pdf_key):
+    return f"{TEMP_MARKDOWN_CLEANED}/{Path(pdf_key).stem}.md"
+
+
+def invalidate_derived(pdf_key):
+    """Borra derivados de un PDF modificado para forzar regeneración."""
+    for p in [cleaned_md_path(pdf_key)]:
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            pass
+
+
+def backfill_llm_etag(pdf_key, etag):
+    """Propaga el ETag adoptado a resultados LLM existentes (evita re-llamadas)."""
+    results = load_llm_results()
+    changed = False
+    for r in results:
+        if r.get("pdf_key") == pdf_key and r.get("etag") != etag:
+            r["etag"] = etag
+            changed = True
+    if changed:
+        save_llm_results(results)
+
+
+def adopt_with_artifacts(files, dois, key, etag):
+    """Adopta un PDF ya convertido: DOI desde el markdown existente + backfill LLM."""
+    doi = dois.get(key)
+    try:
+        with open(cleaned_md_path(key), "r", encoding="utf-8", errors="replace") as f:
+            doi = extract_doi(f.read()) or doi
+    except OSError:
+        pass
+    adopt(files, key, etag, doi)
+    if doi:
+        dois[key] = doi
+    backfill_llm_etag(key, etag)
 
 
 def process_single_pdf(s3_client, pdf_key, errors):
@@ -129,7 +182,7 @@ def process_single_pdf(s3_client, pdf_key, errors):
             download_pdf(s3_client, pdf_key, local_pdf)
             md_path = pdf_to_markdown(local_pdf, TEMP_MARKDOWN)
 
-            with open(md_path, "r") as f:
+            with open(md_path, "r", encoding="utf-8", errors="replace") as f:
                 raw_md = f.read()
 
             doi = extract_doi(raw_md)
@@ -137,7 +190,7 @@ def process_single_pdf(s3_client, pdf_key, errors):
 
             nombre_md = Path(md_path).stem
             cleaned_path = f"{TEMP_MARKDOWN_CLEANED}/{nombre_md}.md"
-            with open(cleaned_path, "w") as f:
+            with open(cleaned_path, "w", encoding="utf-8") as f:
                 f.write(cleaned_md)
 
             elapsed = round(time.time() - start, 1)
@@ -169,9 +222,10 @@ def print_report(progress, errors, start_time):
     minutes = int(elapsed // 60)
     seconds = int(elapsed % 60)
 
-    total = progress["total_pdfs"]
-    completed = len(progress["completed"])
-    failed = len(progress["failed"])
+    files = progress.get("files", {})
+    total = progress.get("total_pdfs", 0)
+    completed = len(completed_keys(files))
+    failed = len(failed_keys(files))
 
     error_counts = {}
     for err in errors:
@@ -196,64 +250,65 @@ def print_report(progress, errors, start_time):
 
 
 # ============================================
-# MAIN
+# FASES
 # ============================================
 
-def main():
-    ensure_dirs()
-    start_time = time.time()
-
-    s3 = get_s3_client()
-    pdfs = list_pdfs(s3)
-    total = len(pdfs)
-    print(f"PDFs encontrados en R2: {total}")
-
-    progress = load_progress()
-    progress["total_pdfs"] = total
-    completed_set = set(progress["completed"])
-
-    pending_pdfs = [p for p in pdfs if p not in completed_set]
-    print(f"PDFs pendientes: {len(pending_pdfs)}")
-    print(f"Workers paralelos: {MAX_WORKERS}")
-
-    errors = load_errors()
-    dois = load_dois()
-
-    # FASE 1: Descargar y convertir PDFs a markdown
+def run_phase_1(s3, r2_objects, progress, errors, dois):
+    """Descarga/conversión incremental: solo new/retry/changed/unverified."""
     print("\n" + "=" * 50)
-    print("  FASE 1: Descarga y conversión de PDFs")
+    print("  FASE 1: Descarga y conversión de PDFs (incremental)")
     print("=" * 50)
 
-    total_batches = (len(pending_pdfs) + BATCH_SIZE - 1) // BATCH_SIZE
+    files = progress.get("files", {})
+    plan, deleted = diff(r2_objects, files)
+    etag_by_key = {o["key"]: o.get("etag") for o in r2_objects}
+
+    # Adopción sin costo: entradas legacy/retry con artefactos válidos existentes
+    to_process = {}
+    adopted = 0
+    for key, item in plan.items():
+        reason = item["reason"]
+        if reason in ("unverified", "retry") and os.path.exists(cleaned_md_path(key)):
+            adopt_with_artifacts(files, dois, key, etag_by_key.get(key))
+            adopted += 1
+        elif reason == "changed":
+            invalidate_derived(key)
+            to_process[key] = item
+        else:
+            to_process[key] = item
+
+    print(f"PDFs en R2: {len(r2_objects)} | ya al día: {len(r2_objects) - len(plan)} "
+          f"| adoptados sin costo: {adopted} | a procesar: {len(to_process)}")
+    for reason in ["new", "retry", "changed", "unverified"]:
+        n = sum(1 for v in to_process.values() if v["reason"] == reason)
+        if n:
+            print(f"  - {reason}: {n}")
+    if deleted:
+        print(f"  - eliminados de R2 (prune en Fase 3): {len(deleted)}")
+
+    pending = list(to_process.keys())
+    print(f"Workers paralelos: {MAX_WORKERS}")
+    total_batches = (len(pending) + BATCH_SIZE - 1) // BATCH_SIZE if pending else 0
 
     for batch_num in range(total_batches):
         batch_start = batch_num * BATCH_SIZE
-        batch_end = batch_start + BATCH_SIZE
-        batch = pending_pdfs[batch_start:batch_end]
-
-        print(f"\n--- Batch {batch_num + 1}/{total_batches} ({len(batch)} PDFs) ---")
+        batch = pending[batch_start:batch_start + BATCH_SIZE]
+        print(f"\n--- Batch {batch_num + 1}/{total_batches} ({len(batch)} PDFs) ---", flush=True)
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {
-                executor.submit(process_single_pdf, s3, pdf_key, errors): pdf_key
-                for pdf_key in batch
-            }
-
+            futures = {executor.submit(process_single_pdf, s3, k, errors): k for k in batch}
             for future in as_completed(futures):
                 success, md_path, elapsed, pdf_key, doi = future.result()
                 nombre = pdf_key.split("/")[-1]
-
-                if success:
-                    with file_lock:
-                        progress["completed"].append(pdf_key)
+                with file_lock:
+                    if success:
+                        mark_completed(files, pdf_key, etag_by_key.get(pdf_key), doi)
                         dois[pdf_key] = doi
-                    doi_display = doi if doi else "sin DOI"
-                    print(f"  OK   {nombre} ({elapsed}s) [{doi_display}]")
-                else:
-                    with file_lock:
-                        progress["failed"].append(pdf_key)
-                    print(f"  FAIL {nombre} ({elapsed}s)")
-
+                    else:
+                        mark_failed(files, pdf_key, etag_by_key.get(pdf_key))
+                doi_display = doi if doi else "sin DOI"
+                status = "OK  " if success else "FAIL"
+                print(f"  {status} {nombre} ({elapsed}s) [{doi_display}]", flush=True)
                 save_progress(progress)
                 save_errors(errors)
                 save_dois(dois)
@@ -261,116 +316,176 @@ def main():
         progress["last_batch"] = batch_num + 1
         progress["last_index"] = batch_start + len(batch)
         save_progress(progress)
+        print(f"  Batch {batch_num + 1} completado.", flush=True)
 
-        print(f"  Batch {batch_num + 1} completado.")
+    return deleted
 
-    # FASE 2: Procesar markdowns con LLM
+
+def run_phase_2(progress, errors, dois):
+    """Extracción LLM: solo documentos sin resultado válido para su ETag."""
     print("\n" + "=" * 50)
-    print("  FASE 2: Extracción WVTR con LLM")
+    print("  FASE 2: Extracción WVTR con LLM (incremental)")
     print("=" * 50)
 
+    files = progress.get("files", {})
     llm_client = get_client()
     llm_results = load_llm_results()
-    processed_keys = {r["pdf_key"] for r in llm_results}
+    etag_done = {r["pdf_key"]: r.get("etag") for r in llm_results}
 
-    completed_markdowns = []
-    for pdf_key in progress["completed"]:
-        if pdf_key not in processed_keys:
-            nombre = Path(pdf_key).stem
-            md_path = f"{TEMP_MARKDOWN_CLEANED}/{nombre}.md"
-            if os.path.exists(md_path):
-                completed_markdowns.append((pdf_key, md_path, dois.get(pdf_key)))
+    queue = []
+    for pdf_key in completed_keys(files):
+        md_path = cleaned_md_path(pdf_key)
+        if not os.path.exists(md_path):
+            continue
+        cur_etag = files[pdf_key].get("etag")
+        done_etag = etag_done.get(pdf_key)
+        # Re-procesar si cambió el ETag o si nunca se procesó con ETag conocido
+        if done_etag is not None and cur_etag is not None and done_etag == cur_etag:
+            continue
+        queue.append((pdf_key, md_path, dois.get(pdf_key), cur_etag))
 
-    print(f"Markdowns pendientes para LLM: {len(completed_markdowns)}")
+    print(f"Markdowns pendientes para LLM: {len(queue)} (con resultado vigente: "
+          f"{len(etag_done) - len([q for q in queue if q[0] in etag_done])})")
     print(f"Lote LLM: {LLM_BATCH_SIZE} markdowns")
 
-    llm_batches = [
-        completed_markdowns[i:i + LLM_BATCH_SIZE]
-        for i in range(0, len(completed_markdowns), LLM_BATCH_SIZE)
-    ]
-
-    for llm_batch_num, llm_batch in enumerate(llm_batches):
-        print(f"\n--- LLM Batch {llm_batch_num + 1}/{len(llm_batches)} ---")
-
-        for pdf_key, md_path, doi in llm_batch:
+    llm_batches = [queue[i:i + LLM_BATCH_SIZE] for i in range(0, len(queue), LLM_BATCH_SIZE)]
+    for n, batch in enumerate(llm_batches):
+        print(f"\n--- LLM Batch {n + 1}/{len(llm_batches)} ---", flush=True)
+        for pdf_key, md_path, doi, etag in batch:
             nombre = Path(pdf_key).stem
-            print(f"  Procesando: {nombre}...", end=" ")
-
+            print(f"  Procesando: {nombre}...", end=" ", flush=True)
             try:
-                with open(md_path, "r") as f:
+                with open(md_path, "r", encoding="utf-8", errors="replace") as f:
                     markdown_text = f.read()
-
-                llm_result = extract_wvtr_with_retry(
-                    llm_client, markdown_text, doi, nombre
-                )
-
+                llm_result = extract_wvtr_with_retry(llm_client, markdown_text, doi, nombre)
                 with file_lock:
-                    add_llm_result(llm_results, pdf_key, doi, llm_result)
+                    add_llm_result(llm_results, pdf_key, doi, etag, llm_result)
                     save_llm_results(llm_results)
-
-                n_registros = len(llm_result.get("registros", []))
-                print(f"OK ({n_registros} registros)")
-
+                print(f"OK ({len(llm_result.get('registros', []))} registros)", flush=True)
             except LLMError as e:
-                print(f"FALLÓ ({e})")
+                print(f"FALLÓ ({e})", flush=True)
                 add_error(errors, pdf_key, "LLMError", e)
                 save_errors(errors)
-
             time.sleep(3)
+        print(f"  LLM Batch {n + 1} completado.", flush=True)
+    return llm_results
 
-        print(f"  LLM Batch {llm_batch_num + 1} completado.")
 
-    # FASE 3: Insertar en PostgreSQL
+def run_phase_3(llm_results, r2_keys, dois, do_prune=True):
+    """Upsert idempotente + prune. Con progreso por documento (no se cuelga en silencio)."""
     print("\n" + "=" * 50)
-    print("  FASE 3: Insertar en PostgreSQL")
+    print("  FASE 3: Sincronizar PostgreSQL (upsert + prune)")
     print("=" * 50)
 
+    print("Conectando a PostgreSQL (timeout 10s)...", flush=True)
+    conn = get_connection()
+    print("Conectado a PostgreSQL", flush=True)
     try:
-        conn = get_connection()
-        print("Conectado a PostgreSQL")
-
-        total_inserted = 0
-        for result in llm_results:
+        ensure_schema(conn)
+        total = len(llm_results)
+        replaced = errors_n = 0
+        for i, result in enumerate(llm_results, 1):
+            if "error" in result or "parse_error" in result:
+                continue
+            label = (result.get("article_title") or result.get("pdf_key", ""))[:45]
+            print(f"  [{i}/{total}] {label}...", end=" ", flush=True)
             try:
-                n = insert_wvtr(
+                n = replace_document(
                     conn,
                     article_title=result.get("article_title"),
                     doi=result.get("doi"),
                     pdf_url=result.get("pdf_key", ""),
                     llm_result={"registros": result.get("registros", [])},
-                    raw_json=result
+                    raw_json=result,
                 )
-                total_inserted += n
+                replaced += n
+                print(f"OK ({n})", flush=True)
             except DatabaseError as e:
-                print(f"  Error insertando {result.get('pdf_key')}: {e}")
-                continue
-
+                errors_n += 1
+                print(f"ERROR ({e})", flush=True)
+        pruned = prune_stale(conn, r2_keys, list(dois.values())) if do_prune else 0
         stats = get_stats(conn)
-        release_connection(conn)
-
-        print(f"Registros insertados: {total_inserted}")
+        print(f"Registros (upsert): {replaced} | podados: {pruned} | errores: {errors_n}")
         print(f"Total en BD: {stats['total_registros']}")
         print(f"DOIs únicos: {stats['dois_unicos']}")
         print(f"Polímeros únicos: {stats['polimeros_unicos']}")
+        return stats
+    finally:
+        release_connection(conn)
 
-    except DatabaseError as e:
-        print(f"Error de conexión a BD: {e}")
+
+# ============================================
+# MAIN
+# ============================================
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description="Pipeline WVTR: R2 -> Markdown -> LLM -> PostgreSQL")
+    p.add_argument("--phase", choices=["1", "2", "3", "all"], default="all",
+                   help="Fase a ejecutar (default: all)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Fase 1/2: calcula el plan sin descargar ni llamar al LLM")
+    p.add_argument("--no-prune", action="store_true",
+                   help="Fase 3: no borrar filas de PDFs eliminados de R2")
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    ensure_dirs()
+    start_time = time.time()
+
+    try:
+        s3 = get_s3_client()
+        r2_objects = list_pdf_objects(s3)
+    except R2ConnectionError as e:
+        print(f"Error conectando a R2: {e}")
+        return
+    print(f"PDFs encontrados en R2: {len(r2_objects)}")
+
+    progress = load_progress()
+    progress["total_pdfs"] = len(r2_objects)
+    errors = load_errors()
+    dois = load_dois()
+    save_progress(progress)
+
+    llm_results = load_llm_results()
+    deleted = []
+
+    if args.phase in ("1", "all"):
+        if args.dry_run:
+            plan, deleted = diff(r2_objects, progress.get("files", {}))
+            print(f"[dry-run] a procesar: {len(plan)}, eliminados: {len(deleted)}")
+            for k, v in plan.items():
+                print(f"  {v['reason']:>10}  {k}")
+        else:
+            deleted = run_phase_1(s3, r2_objects, progress, errors, dois)
+            llm_results = load_llm_results()  # recarga por si Fase 1 invalidó derivados
+
+    if args.phase in ("2", "all") and not args.dry_run:
+        llm_results = run_phase_2(progress, errors, dois)
+
+    if args.phase in ("3", "all") and not args.dry_run:
+        try:
+            run_phase_3(llm_results, [o["key"] for o in r2_objects], dois,
+                        do_prune=not args.no_prune)
+            for key in deleted:
+                mark_pruned(progress.get("files", {}), key)
+            save_progress(progress)
+        except DatabaseError as e:
+            print(f"Error de conexión a BD: {e}")
 
     # REPORTE FINAL
+    files = progress.get("files", {})
     elapsed = time.time() - start_time
-    minutes = int(elapsed // 60)
-    seconds = int(elapsed % 60)
-
-    total_registros = sum(len(r.get("registros", [])) for r in llm_results)
-
+    total_registros = sum(len(r.get("registros", [])) for r in llm_results if "registros" in r)
     print("\n" + "=" * 50)
     print("         RESUMEN FINAL")
     print("=" * 50)
-    print(f"PDFs procesados:     {len(progress['completed'])}")
-    print(f"PDFs fallidos:       {len(progress['failed'])}")
+    print(f"PDFs procesados:     {len(completed_keys(files))}")
+    print(f"PDFs fallidos:       {len(failed_keys(files))}")
     print(f"DOIs extraídos:      {len([d for d in dois.values() if d])}")
     print(f"Registros WVTR:      {total_registros}")
-    print(f"Tiempo total:        {minutes} min {seconds} sec")
+    print(f"Tiempo total:        {int(elapsed // 60)} min {int(elapsed % 60)} sec")
     print("=" * 50)
 
 
