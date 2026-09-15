@@ -140,10 +140,10 @@ def run_evaluation():
         }, indent=2))
         return
 
-    with open(RESULTS_FILE, "r") as f:
+    with open(RESULTS_FILE, "r", encoding="utf-8") as f:
         results = json.load(f)
 
-    with open(GROUND_TRUTH_FILE, "r") as f:
+    with open(GROUND_TRUTH_FILE, "r", encoding="utf-8") as f:
         ground_truth = json.load(f)
 
     summary = {}
@@ -177,7 +177,7 @@ def run_evaluation():
         summary[model_name] = avg
 
     eval_file = os.path.join(BENCHMARK_DIR, "evaluation.json")
-    with open(eval_file, "w") as f:
+    with open(eval_file, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
     print("\n" + "=" * 80)
