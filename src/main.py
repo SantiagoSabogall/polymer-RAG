@@ -43,7 +43,7 @@ def main():
         print(f"Markdown: {md_path}")
 
         # Mostrar inicio del markdown
-        with open(md_path, "r") as f:
+        with open(md_path, "r", encoding="utf-8", errors="replace") as f:
             contenido = f.read(300)
             print(f"Preview:\n{contenido[:300]}...")
 

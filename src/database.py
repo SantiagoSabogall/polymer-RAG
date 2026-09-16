@@ -30,7 +30,13 @@ def init_pool(minconn=2, maxconn=10):
             port=PG_PORT,
             database=PG_DATABASE,
             user=PG_USER,
-            password=PG_PASSWORD
+            password=PG_PASSWORD,
+            connect_timeout=10,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=3,
+            application_name="wvtr-pipeline"
         )
         logger.info(f"Pool de conexiones inicializado: {minconn}-{maxconn} conexiones")
     except Exception as e:
@@ -168,6 +174,109 @@ def is_already_processed(doi):
         return False
     finally:
         release_connection(conn)
+
+
+def ensure_schema(conn):
+    """Crea índices idempotentes para upsert/prune (seguro en BD existentes).
+
+    Nota: NO se crea UNIQUE(doi) porque un mismo artículo (DOI) tiene
+    múltiples filas (una por registro WVTR). La idempotencia la da
+    replace_document() con borrado previo por documento.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_wvtr_doi ON wvtr_data(doi)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_wvtr_pdf_url ON wvtr_data(pdf_url)"
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise DatabaseError(f"Error asegurando esquema: {e}")
+
+
+def replace_document(conn, article_title, doi, pdf_url, llm_result, raw_json):
+    """Reemplazo idempotente: borra filas previas del documento e inserta.
+
+    Clave: DOI si existe, si no pdf_url. Re-correr el mismo documento
+    no duplica filas (fix del cuelgue/duplicados de Fase 3).
+    """
+    registros = llm_result.get("registros", [])
+    if not registros:
+        logger.info("No hay registros WVTR para insertar")
+        return 0
+
+    rows = []
+    for reg in registros:
+        rows.append((
+            article_title,
+            doi,
+            reg.get("polymer"),
+            reg.get("wvtr_value"),
+            reg.get("wvtr_units"),
+            reg.get("temperature"),
+            reg.get("rh"),
+            reg.get("thickness"),
+            reg.get("test_method"),
+            pdf_url,
+            json.dumps(raw_json, ensure_ascii=False)
+        ))
+
+    query = """
+        INSERT INTO wvtr_data (
+            article_title, doi, polymer, wvtr_value, wvtr_units,
+            temperature, rh, thickness, test_method, pdf_url, raw_json
+        ) VALUES %s
+    """
+
+    try:
+        with conn.cursor() as cur:
+            if doi:
+                cur.execute("DELETE FROM wvtr_data WHERE doi = %s", (doi,))
+            else:
+                cur.execute("DELETE FROM wvtr_data WHERE doi IS NULL AND pdf_url = %s", (pdf_url,))
+            execute_values(cur, query, rows, page_size=1000)
+        conn.commit()
+        logger.info(f"Reemplazados {len(rows)} registros WVTR (doi={doi or 'N/A'})")
+        return len(rows)
+    except Exception as e:
+        conn.rollback()
+        raise DatabaseError(f"Error reemplazando documento: {e}")
+
+
+def prune_stale(conn, current_keys, current_dois):
+    """Borra filas cuyo PDF ya no existe en R2 (doi o pdf_url fuera del set actual)."""
+    current_keys = set(current_keys or [])
+    current_dois = set(d for d in (current_dois or []) if d)
+    try:
+        with conn.cursor() as cur:
+            if current_dois:
+                cur.execute(
+                    "DELETE FROM wvtr_data WHERE doi IS NOT NULL "
+                    "AND NOT (doi = ANY(%s))",
+                    (list(current_dois),)
+                )
+                by_doi = cur.rowcount
+            else:
+                by_doi = 0
+            if current_keys:
+                cur.execute(
+                    "DELETE FROM wvtr_data WHERE doi IS NULL "
+                    "AND NOT (pdf_url = ANY(%s))",
+                    (list(current_keys),)
+                )
+                by_key = cur.rowcount
+            else:
+                # Sin claves actuales: conserva filas sin DOI (no se puede decidir)
+                by_key = 0
+        conn.commit()
+        logger.info(f"Prune: {by_doi} filas por DOI + {by_key} por pdf_url eliminadas")
+        return by_doi + by_key
+    except Exception as e:
+        conn.rollback()
+        raise DatabaseError(f"Error podando registros obsoletos: {e}")
 
 
 def get_stats(conn):

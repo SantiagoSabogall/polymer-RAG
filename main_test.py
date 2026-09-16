@@ -11,6 +11,7 @@ Pipeline:
 Autor: Sebastian Sabogal
 """
 
+import argparse
 import asyncio
 import json
 import logging
@@ -35,14 +36,21 @@ if platform.system() == "Windows":
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from clean_markdown import CleanError, clean_markdown, extract_doi
-from cloudfareR2 import DownloadError, R2ConnectionError, download_pdf, get_s3_client, list_pdfs
+from cloudfareR2 import DownloadError, R2ConnectionError, download_pdf, get_s3_client, list_pdf_objects
 from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
 from database import (
     DatabaseError,
+    ensure_schema,
     get_connection,
     get_stats,
-    insert_wvtr,
+    prune_stale,
+    release_connection,
+    replace_document,
     is_already_processed,
+)
+from sync_state import (
+    migrate_legacy, diff, mark_completed, mark_failed, adopt, mark_pruned,
+    completed_keys, failed_keys,
 )
 from llm import parse_llm_json
 from monitoring import PerformanceMetrics, StructuredLogger
@@ -113,7 +121,7 @@ def ensure_dirs():
 def load_json(filepath: Path, default=None):
     """Carga un archivo JSON. Si no existe, retorna default."""
     if filepath.exists():
-        with open(filepath, "r") as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             return json.load(f)
     return default if default is not None else {}
 
@@ -121,7 +129,7 @@ def load_json(filepath: Path, default=None):
 def save_json(filepath: Path, data):
     """Guarda datos en un archivo JSON de forma thread-safe."""
     with file_lock:
-        with open(filepath, "w") as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
 
@@ -142,15 +150,15 @@ def add_error(errors: list, pdf_key: str, error_type: str, error_msg):
 def save_pipeline_state(state):
     """Guarda el estado actual del pipeline."""
     state_file = TEMP_DIR / "pipeline_state.json"
-    with open(state_file, "w") as f:
-        json.dump(state, f, indent=2)
+    with open(state_file, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
 
 
 def load_pipeline_state():
     """Carga el estado del pipeline (si existe)."""
     state_file = TEMP_DIR / "pipeline_state.json"
     if state_file.exists():
-        with open(state_file) as f:
+        with open(state_file, encoding="utf-8") as f:
             return json.load(f)
     return {"completed": [], "failed": [], "last_run": None}
 
@@ -195,7 +203,7 @@ def process_single_pdf(s3_client, pdf_key: str, errors: list) -> tuple:
         md_path = pdf_to_markdown(local_pdf, str(TEMP_MARKDOWN))
 
         # Paso 3: Leer markdown crudo
-        with open(md_path, "r") as f:
+        with open(md_path, "r", encoding="utf-8", errors="replace") as f:
             raw_md = f.read()
 
         # Paso 4: Extraer DOI
@@ -207,7 +215,7 @@ def process_single_pdf(s3_client, pdf_key: str, errors: list) -> tuple:
         # Paso 6: Guardar markdown limpio
         nombre_md = Path(md_path).stem
         cleaned_path = TEMP_MARKDOWN_CLEANED / f"{nombre_md}.md"
-        with open(cleaned_path, "w") as f:
+        with open(cleaned_path, "w", encoding="utf-8") as f:
             f.write(cleaned_md)
 
         elapsed = round(time.time() - start, 1)
@@ -232,40 +240,97 @@ def process_single_pdf(s3_client, pdf_key: str, errors: list) -> tuple:
                 pass
 
 
-def run_phase_1(pdfs: list, progress: dict, errors: list, dois: dict) -> int:
-    """
-    FASE 1: Descarga masiva de PDFs desde R2.
+def _cleaned_path_for(pdf_key: str) -> Path:
+    return TEMP_MARKDOWN_CLEANED / f"{Path(pdf_key).stem}.md"
 
-    Usa ThreadPoolExecutor para descargar en paralelo.
-    Procesa en lotes de BATCH_SIZE para no sobrecargar R2.
+
+def _result_path_for_md(md: Path) -> Path:
+    return TEMP_RESULTS / f"{md.stem}__gpt-5.6-luna.json"
+
+
+def _adopt_with_artifacts(files: dict, dois: dict, key: str, etag):
+    """Adopta un PDF ya convertido: DOI desde el markdown + backfill del JSON LLM."""
+    doi = dois.get(key)
+    try:
+        doi = extract_doi(_cleaned_path_for(key).read_text(encoding="utf-8", errors="replace")) or doi
+    except OSError:
+        pass
+    adopt(files, key, etag, doi)
+    if doi:
+        dois[key] = doi
+    rp = _result_path_for_md(_cleaned_path_for(key))
+    if rp.exists() and rp.stat().st_size > 0:
+        try:
+            data = json.loads(rp.read_text(encoding="utf-8"))
+            meta = data.setdefault("_meta", {})
+            meta["etag"] = etag
+            meta["pdf_key"] = key
+            if meta.get("doi") is None and doi:
+                meta["doi"] = doi
+            rp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+
+def _invalidate_derived(pdf_key: str):
+    """Borra markdown limpio + JSON LLM de un PDF modificado."""
+    for p in [_cleaned_path_for(pdf_key),
+              _result_path_for_md(_cleaned_path_for(pdf_key))]:
+        try:
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
+
+
+def run_phase_1(r2_objects: list, progress: dict, errors: list, dois: dict) -> tuple:
+    """
+    FASE 1: Descarga incremental de PDFs desde R2 (solo new/retry/changed).
 
     Returns:
-        count de PDFs procesados exitosamente
+        (procesados_ok, deleted) donde deleted son claves que ya no están en R2.
     """
     logger.info("=" * 50)
-    logger.info("  FASE 1: Descarga y Conversión de PDFs")
+    logger.info("  FASE 1: Descarga y Conversión de PDFs (incremental)")
     logger.info("=" * 50)
 
-    completed_set = set(progress.get("completed", []))
-    pending_pdfs = [p for p in pdfs if p not in completed_set]
+    progress = migrate_legacy(progress, dois)
+    files = progress.setdefault("files", {})
+    plan, deleted = diff(r2_objects, files)
+    etag_by_key = {o["key"]: o.get("etag") for o in r2_objects}
 
-    logger.info(f"PDFs totales en R2: {len(pdfs)}")
-    logger.info(f"PDFs ya procesados: {len(completed_set)}")
-    logger.info(f"PDFs pendientes: {len(pending_pdfs)}")
+    # Adopción sin costo: entradas legacy/retry con markdown limpio ya existente
+    to_process = {}
+    adopted = 0
+    for key, item in plan.items():
+        if item["reason"] in ("unverified", "retry") and _cleaned_path_for(key).exists():
+            _adopt_with_artifacts(files, dois, key, etag_by_key.get(key))
+            adopted += 1
+        elif item["reason"] == "changed":
+            _invalidate_derived(key)
+            to_process[key] = item
+        else:
+            to_process[key] = item
+
+    pending = list(to_process.keys())
+    logger.info(f"PDFs en R2: {len(r2_objects)}")
+    logger.info(f"Ya al día: {len(r2_objects) - len(plan)} | adoptados: {adopted} "
+                f"| a procesar: {len(pending)} | eliminados de R2: {len(deleted)}")
     logger.info(f"Workers paralelos: {MAX_WORKERS_DOWNLOAD}")
 
-    if not pending_pdfs:
+    if not pending:
         logger.info("No hay PDFs pendientes para descargar.")
-        return 0
+        save_json(PROGRESS_FILE, progress)
+        save_json(DOIS_FILE, dois)
+        return 0, deleted
 
     s3 = get_s3_client()
-    total_batches = (len(pending_pdfs) + BATCH_SIZE - 1) // BATCH_SIZE
+    total_batches = (len(pending) + BATCH_SIZE - 1) // BATCH_SIZE
     processed_count = 0
 
     for batch_num in range(total_batches):
         batch_start = batch_num * BATCH_SIZE
-        batch_end = batch_start + BATCH_SIZE
-        batch = pending_pdfs[batch_start:batch_end]
+        batch = pending[batch_start:batch_start + BATCH_SIZE]
 
         logger.info(f"\n--- Batch {batch_num + 1}/{total_batches} ({len(batch)} PDFs) ---")
 
@@ -281,14 +346,14 @@ def run_phase_1(pdfs: list, progress: dict, errors: list, dois: dict) -> int:
 
                 if success:
                     with file_lock:
-                        progress["completed"].append(pdf_key)
+                        mark_completed(files, pdf_key, etag_by_key.get(pdf_key), doi)
                         dois[pdf_key] = doi
                     processed_count += 1
                     doi_display = doi if doi else "sin DOI"
                     logger.info(f"  OK   {nombre} ({elapsed}s) [{doi_display}]")
                 else:
                     with file_lock:
-                        progress["failed"].append(pdf_key)
+                        mark_failed(files, pdf_key, etag_by_key.get(pdf_key))
                     logger.error(f"  FAIL {nombre} ({elapsed}s)")
 
                 # Guardar progreso después de cada archivo
@@ -298,7 +363,7 @@ def run_phase_1(pdfs: list, progress: dict, errors: list, dois: dict) -> int:
 
         logger.info(f"  Batch {batch_num + 1} completado.")
 
-    return processed_count
+    return processed_count, deleted
 
 
 # ============================================
@@ -325,7 +390,7 @@ def log_llm_progress(total: int):
 
 
 async def process_file(client: AsyncOpenAI, semaphore: asyncio.Semaphore,
-                       md_path: Path, doi: str, total: int) -> dict:
+                       md_path: Path, doi: str, pdf_key: str, etag: str, total: int) -> dict:
     """
     Procesa un solo markdown con el LLM:
     1. Lee el contenido del markdown
@@ -339,20 +404,24 @@ async def process_file(client: AsyncOpenAI, semaphore: asyncio.Semaphore,
     """
     out_path = TEMP_RESULTS / f"{md_path.stem}__gpt-5.6-luna.json"
 
-    # Si ya existe el resultado, actualizar DOI si falta y saltarlo
+    # Si ya existe un resultado vigente para este ETag, actualizar DOI si falta y saltarlo
     if out_path.exists():
-        existing_data = json.loads(out_path.read_text())
-        # Actualizar DOI en metadata si no existe
-        if existing_data.get("_meta", {}).get("doi") is None and doi:
-            existing_data["_meta"]["doi"] = doi
-            out_path.write_text(json.dumps(existing_data, indent=2, ensure_ascii=False))
-        logger.info(f"[SKIP] {md_path.name} (ya existe)")
-        llm_stats["skipped"] += 1
-        log_llm_progress(total)
-        return existing_data
+        try:
+            existing_data = json.loads(out_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing_data = None
+        if existing_data and existing_data.get("_meta", {}).get("etag") == etag:
+            if existing_data.get("_meta", {}).get("doi") is None and doi:
+                existing_data["_meta"]["doi"] = doi
+                out_path.write_text(json.dumps(existing_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            logger.info(f"[SKIP] {md_path.name} (resultado vigente)")
+            llm_stats["skipped"] += 1
+            log_llm_progress(total)
+            return existing_data
+        # Resultado obsoleto o corrupto: se regenera abajo
 
     # Leer contenido del markdown
-    content = md_path.read_text()
+    content = md_path.read_text(encoding="utf-8", errors="replace")
     tokens_aprox = len(content) // 4
     logger.info(f"[START] {md_path.name} ({len(content)} chars, ~{tokens_aprox} tokens)")
 
@@ -439,10 +508,12 @@ async def process_file(client: AsyncOpenAI, semaphore: asyncio.Semaphore,
         "tokens_out": tokens_out,
         "model": MODEL,
         "doi": doi,
+        "pdf_key": pdf_key,
+        "etag": etag,
     }
 
     # Guardar JSON
-    out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     logger.info(f"[DONE] {md_path.name} en {latency:.1f}s -> {out_path.name}")
 
     llm_stats["processed"] += 1
@@ -450,15 +521,12 @@ async def process_file(client: AsyncOpenAI, semaphore: asyncio.Semaphore,
     return result
 
 
-async def run_phase_2(dois: dict) -> list:
+async def run_phase_2(dois: dict, files: dict = None) -> list:
     """
-    FASE 2: Extracción WVTR con LLM async.
+    FASE 2: Extracción WVTR con LLM async (incremental por ETag).
 
-    Procesa todos los markdowns limpios en paralelo (hasta MAX_CONCURRENT_LLM).
-    Guarda cada resultado como JSON individual.
-
-    Returns:
-        lista de resultados del LLM
+    Solo llama al LLM para markdowns sin resultado vigente. Si el estado
+    indica completed pero el markdown no existe, se omite (ya se marcó en Fase 1).
     """
     logger.info("=" * 50)
     logger.info("  FASE 2: Extracción WVTR con LLM")
@@ -466,8 +534,33 @@ async def run_phase_2(dois: dict) -> list:
 
     llm_stats["start_time"] = time.time()
 
-    # Encontrar markdowns limpios pendientes
-    md_files = sorted(TEMP_MARKDOWN_CLEANED.glob("*.md"), key=lambda f: f.stat().st_size)
+    # Mapear pdf_key/etag/doi por stem de markdown desde el estado + dois
+    files = files or {}
+    key_by_stem = {}
+    for pdf_key, entry in files.items():
+        if entry.get("status") == "completed":
+            key_by_stem[Path(pdf_key).stem] = (
+                pdf_key, entry.get("etag"), entry.get("doi") or dois.get(pdf_key))
+    for pdf_key, doi in dois.items():  # fallback legacy sin estado
+        key_by_stem.setdefault(Path(pdf_key).stem, (pdf_key, None, doi))
+
+    # Solo markdowns cuyo resultado no esté vigente para su ETag
+    md_files = []
+    for md in sorted(TEMP_MARKDOWN_CLEANED.glob("*.md"), key=lambda f: f.stat().st_size):
+        mapping = key_by_stem.get(md.stem)
+        out_path = _result_path_for_md(md)
+        if mapping is None:
+            continue  # huérfano: no está en el estado
+        _, etag, _ = mapping
+        if out_path.exists():
+            try:
+                meta = json.loads(out_path.read_text(encoding="utf-8")).get("_meta", {})
+            except Exception:
+                meta = {}
+            if meta.get("etag") == etag and out_path.stat().st_size > 0:
+                llm_stats["skipped"] += 1
+                continue
+        md_files.append(md)
 
     if not md_files:
         logger.error(f"No se encontraron markdowns en {TEMP_MARKDOWN_CLEANED}")
@@ -488,17 +581,11 @@ async def run_phase_2(dois: dict) -> list:
     client = AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM)
 
-    # Mapear DOI por nombre de archivo
-    doi_map = {}
-    for pdf_key, doi in dois.items():
-        nombre = Path(pdf_key).stem
-        doi_map[nombre] = doi
-
-    # Procesar todos los archivos en paralelo
-    tasks = [
-        process_file(client, semaphore, md, doi_map.get(md.stem), total)
-        for md in md_files
-    ]
+    # Procesar solo los archivos pendientes (con su pdf_key y etag)
+    tasks = []
+    for md in md_files:
+        pdf_key, etag, doi = key_by_stem[md.stem]
+        tasks.append(process_file(client, semaphore, md, doi, pdf_key, etag, total))
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Manejar excepciones que no fueron capturadas dentro de process_file
@@ -531,38 +618,40 @@ async def run_phase_2(dois: dict) -> list:
 # FASE 3: BASE DE DATOS
 # ============================================
 
-def run_phase_3(llm_results: list, dois: dict) -> dict:
+def run_phase_3(llm_results: list, dois: dict, r2_keys: list = None, do_prune: bool = True) -> dict:
     """
-    FASE 3: Insertar resultados en PostgreSQL.
+    FASE 3: Sincronizar resultados en PostgreSQL (upsert idempotente + prune).
 
-    1. Conecta a PostgreSQL
-    2. Para cada resultado del LLM, inserta los registros WVTR
-    3. Muestra estadísticas de la BD
-
-    Returns:
-        dict con estadísticas de la inserción
+    - Reemplaza filas por documento (DOI o pdf_key): re-correr no duplica.
+    - Poda filas de PDFs eliminados de R2.
+    - Progreso por documento para que nunca parezca colgada.
     """
     logger.info("=" * 50)
-    logger.info("  FASE 3: Insertar en PostgreSQL")
+    logger.info("  FASE 3: Sincronizar PostgreSQL (upsert + prune)")
     logger.info("=" * 50)
 
+    conn = None
     try:
+        logger.info("Conectando a PostgreSQL (timeout 10s)...")
         conn = get_connection()
         logger.info("Conectado a PostgreSQL")
+        ensure_schema(conn)
 
-        total_inserted = 0
+        total_upserted = 0
         errors_count = 0
+        pending = [r for r in llm_results
+                   if "error" not in r and "parse_error" not in r]
+        total = len(pending)
 
-        for result in llm_results:
-            # Saltar resultados con error
-            if "error" in result or "parse_error" in result:
-                continue
-
-            pdf_key = result.get("_meta", {}).get("doi", "") or result.get("file", "")
-            doi = result.get("_meta", {}).get("doi")
+        for i, result in enumerate(pending, 1):
+            meta = result.get("_meta", {})
+            doi = meta.get("doi")
+            pdf_key = meta.get("pdf_key") or meta.get("doi", "") or result.get("file", "")
+            label = (result.get("article_title") or pdf_key)[:45]
+            logger.info(f"  [{i}/{total}] {label}...")
 
             try:
-                n = insert_wvtr(
+                n = replace_document(
                     conn,
                     article_title=result.get("article_title"),
                     doi=doi,
@@ -570,27 +659,31 @@ def run_phase_3(llm_results: list, dois: dict) -> dict:
                     llm_result={"registros": result.get("registros", [])},
                     raw_json=result
                 )
-                total_inserted += n
+                total_upserted += n
                 if n > 0:
-                    logger.info(f"  INSERT: {result.get('article_title', 'Unknown')[:50]}... ({n} registros)")
+                    logger.info(f"    -> {n} registros")
             except DatabaseError as e:
                 errors_count += 1
-                logger.error(f"  Error insertando: {e}")
+                logger.error(f"    Error sincronizando: {e}")
                 continue
+
+        pruned = 0
+        if do_prune and r2_keys is not None:
+            pruned = prune_stale(conn, r2_keys, list(dois.values()))
 
         # Obtener estadísticas de la BD
         stats = get_stats(conn)
-        conn.close()
 
         logger.info("")
         logger.info(f"{'='*50}")
         logger.info("RESUMEN FASE 3 - PostgreSQL")
         logger.info(f"{'='*50}")
-        logger.info(f"Registros insertados: {total_inserted}")
-        logger.info(f"Errores de inserción: {errors_count}")
-        logger.info(f"Total en BD:          {stats['total_registros']}")
-        logger.info(f"DOIs únicos:          {stats['dois_unicos']}")
-        logger.info(f"Polímeros únicos:     {stats['polimeros_unicos']}")
+        logger.info(f"Registros (upsert):     {total_upserted}")
+        logger.info(f"Registros podados:      {pruned}")
+        logger.info(f"Errores de inserción:   {errors_count}")
+        logger.info(f"Total en BD:            {stats['total_registros']}")
+        logger.info(f"DOIs únicos:            {stats['dois_unicos']}")
+        logger.info(f"Polímeros únicos:       {stats['polimeros_unicos']}")
         logger.info(f"{'='*50}")
 
         return stats
@@ -598,19 +691,33 @@ def run_phase_3(llm_results: list, dois: dict) -> dict:
     except DatabaseError as e:
         logger.error(f"Error de conexión a BD: {e}")
         return {"error": str(e)}
+    finally:
+        if conn is not None:
+            release_connection(conn)
 
 
 # ============================================
 # MAIN - ORQUESTADOR DEL PIPELINE
 # ============================================
 
-def main():
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description="Pipeline TEST WVTR (incremental)")
+    p.add_argument("--phase", choices=["1", "2", "3", "all"], default="all")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Calcula el plan Fase 1 sin descargar ni llamar al LLM")
+    p.add_argument("--no-prune", action="store_true",
+                   help="Fase 3: no borrar filas de PDFs eliminados de R2")
+    return p.parse_args(argv)
+
+
+def main(argv=None):
     """
     Función principal que orquesta las 3 fases del pipeline:
-    1. Descarga y conversión de PDFs
-    2. Extracción WVTR con LLM
-    3. Inserción en PostgreSQL
+    1. Descarga y conversión de PDFs (incremental por ETag)
+    2. Extracción WVTR con LLM (solo pendientes)
+    3. Sincronización en PostgreSQL (upsert + prune)
     """
+    args = parse_args(argv)
     ensure_dirs()
     start_time = time.time()
 
@@ -627,48 +734,79 @@ def main():
     # ============================================
     try:
         s3 = get_s3_client()
-        pdfs = list_pdfs(s3)
-        logger.info(f"PDFs encontrados en R2: {len(pdfs)}")
-        structured_logger.log_pipeline_start(len(pdfs))
+        r2_objects = list_pdf_objects(s3)
+        logger.info(f"PDFs encontrados en R2: {len(r2_objects)}")
+        structured_logger.log_pipeline_start(len(r2_objects))
     except R2ConnectionError as e:
         logger.error(f"Error conectando a R2: {e}")
         return
 
-    # Cargar estado previo
-    progress = load_json(PROGRESS_FILE, {
+    # Cargar estado previo (migra formato legacy automáticamente)
+    progress = migrate_legacy(load_json(PROGRESS_FILE, {
         "total_pdfs": 0, "completed": [], "failed": []
-    })
-    progress["total_pdfs"] = len(pdfs)
+    }), load_json(DOIS_FILE, {}))
+    progress["total_pdfs"] = len(r2_objects)
     errors = load_json(ERRORS_FILE, [])
     dois = load_json(DOIS_FILE, {})
     pipeline_state = load_pipeline_state()
 
     # Ejecutar FASE 1
-    performance_metrics.start_phase("phase1")
-    phase1_count = run_phase_1(pdfs, progress, errors, dois)
-    performance_metrics.end_phase("phase1")
-    performance_metrics.metrics["phase1"]["pdfs_processed"] = phase1_count
+    phase1_count, deleted = 0, []
+    if args.phase in ("1", "all"):
+        if args.dry_run:
+            plan, deleted = diff(r2_objects, progress.get("files", {}))
+            logger.info(f"[dry-run] a procesar: {len(plan)}, eliminados: {len(deleted)}")
+            for k, v in plan.items():
+                logger.info(f"  {v['reason']:>10}  {k}")
+        else:
+            performance_metrics.start_phase("phase1")
+            phase1_count, deleted = run_phase_1(r2_objects, progress, errors, dois)
+            performance_metrics.end_phase("phase1")
+            performance_metrics.metrics["phase1"]["pdfs_processed"] = phase1_count
+    save_json(PROGRESS_FILE, progress)
 
     # ============================================
     # FASE 2: Extracción LLM
     # ============================================
-    # Ejecutar FASE 2 (async)
-    performance_metrics.start_phase("phase2")
-    llm_results = asyncio.run(run_phase_2(dois))
-    performance_metrics.end_phase("phase2")
-    performance_metrics.metrics["phase2"]["pdfs_processed"] = llm_stats["processed"]
-    performance_metrics.metrics["phase2"]["errors"] = llm_stats["errors"]
-    performance_metrics.metrics["phase2"]["total_tokens"] = llm_stats["total_tokens_in"] + llm_stats["total_tokens_out"]
+    llm_results = []
+    if args.phase in ("2", "3", "all") and not args.dry_run:
+        # Cargar resultados vigentes ya existentes (no re-llamar al LLM)
+        for fp in sorted(TEMP_RESULTS.glob("*.json")):
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                if data.get("registros") is not None:
+                    llm_results.append(data)
+            except Exception:
+                continue
+    if args.phase in ("1", "2", "all") and not args.dry_run:
+        # Ejecutar FASE 2 (async)
+        performance_metrics.start_phase("phase2")
+        # run_phase_2 filtra por ETag; los ya cargados se conservan
+        new_results = asyncio.run(run_phase_2(dois, progress.get("files", {})))
+        seen = {r.get("_meta", {}).get("pdf_key") for r in llm_results}
+        for r in new_results:
+            if isinstance(r, dict) and r.get("_meta", {}).get("pdf_key") not in seen:
+                llm_results.append(r)
+        performance_metrics.end_phase("phase2")
+        performance_metrics.metrics["phase2"]["pdfs_processed"] = llm_stats["processed"]
+        performance_metrics.metrics["phase2"]["errors"] = llm_stats["errors"]
+        performance_metrics.metrics["phase2"]["total_tokens"] = llm_stats["total_tokens_in"] + llm_stats["total_tokens_out"]
 
     # ============================================
     # FASE 3: PostgreSQL
     # ============================================
-    # Ejecutar FASE 3
-    performance_metrics.start_phase("phase3")
-    db_stats = run_phase_3(llm_results, dois)
-    performance_metrics.end_phase("phase3")
-    if "error" not in db_stats:
-        performance_metrics.metrics["phase3"]["records_inserted"] = db_stats.get("total_registros", 0)
+    db_stats = {}
+    if args.phase in ("3", "all") and not args.dry_run:
+        performance_metrics.start_phase("phase3")
+        db_stats = run_phase_3(llm_results, dois,
+                               r2_keys=[o["key"] for o in r2_objects],
+                               do_prune=not args.no_prune)
+        performance_metrics.end_phase("phase3")
+        if "error" not in db_stats:
+            performance_metrics.metrics["phase3"]["records_inserted"] = db_stats.get("total_registros", 0)
+        for key in deleted:
+            mark_pruned(progress.get("files", {}), key)
+        save_json(PROGRESS_FILE, progress)
 
     # ============================================
     # RESUMEN FINAL
@@ -686,7 +824,7 @@ def main():
     # Log de métricas
     metrics_summary = performance_metrics.get_summary()
     structured_logger.log_pipeline_end({
-        "total_pdfs": len(pdfs),
+        "total_pdfs": len(r2_objects),
         "processed": phase1_count,
         "llm_records": total_registros,
         "duration_seconds": total_latency,

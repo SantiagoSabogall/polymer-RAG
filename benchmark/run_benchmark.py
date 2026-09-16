@@ -40,7 +40,7 @@ def get_client():
 def load_papers():
     papers = []
     for f in sorted(Path(PAPERS_DIR).glob("*.md")):
-        with open(f, "r") as fh:
+        with open(f, "r", encoding="utf-8", errors="replace") as fh:
             content = fh.read()
         papers.append({"filename": f.name, "content": content})
     return papers
@@ -96,7 +96,7 @@ def extract_wvtr(model_id, paper, client):
 
 
 def save_results_incremental(results):
-    with open(RESULTS_FILE, "w") as f:
+    with open(RESULTS_FILE, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
 

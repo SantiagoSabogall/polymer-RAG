@@ -29,8 +29,17 @@ def get_s3_client():
 
 
 def list_pdfs(s3_client):
+    """Lista solo las keys .pdf (wrapper backward-compatible)."""
+    return [obj["key"] for obj in list_pdf_objects(s3_client)]
+
+
+def list_pdf_objects(s3_client):
+    """Lista PDFs con metadata de sincronización (key, etag, last_modified, size).
+
+    El ETag permite detectar PDFs nuevos vs modificados sin descargar.
+    """
     try:
-        pdfs = []
+        objs = []
         continuation_token = None
 
         while True:
@@ -40,13 +49,22 @@ def list_pdfs(s3_client):
 
             response = s3_client.list_objects_v2(**kwargs)
             contents = response.get("Contents", [])
-            pdfs.extend(obj["Key"] for obj in contents if obj["Key"].endswith(".pdf"))
+            for obj in contents:
+                key = obj.get("Key", "")
+                if not key.lower().endswith(".pdf"):
+                    continue
+                objs.append({
+                    "key": key,
+                    "etag": (obj.get("ETag") or "").strip('"') or None,
+                    "last_modified": str(obj.get("LastModified")) if obj.get("LastModified") else None,
+                    "size": obj.get("Size"),
+                })
 
             if not response.get("IsTruncated"):
                 break
             continuation_token = response.get("NextContinuationToken")
 
-        return pdfs
+        return objs
     except Exception as e:
         raise R2ConnectionError(f"Error listando PDFs en R2: {e}")
 
