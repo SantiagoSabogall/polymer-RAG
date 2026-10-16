@@ -489,7 +489,7 @@ If you use this software in your research, please cite:
 
 ```bibtex
 @software{wvtr_pipeline2026,
-  author = {Sabogal, Sebastian},
+  author = {Sabogal, Santiago},
   title = {WVTR Extraction Pipeline: Automated Water Vapor Transmission Rate Data Extraction},
   year = {2026},
   url = {https://github.com/SantiagoSabogall/polymer-RAG}
