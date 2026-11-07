@@ -7,9 +7,6 @@ _config_dir = pathlib.Path(__file__).resolve().parent
 load_dotenv(_config_dir.parent / "API_KEY.env")
 
 
-URL_BASE = "http://localhost:20128/v1"
-API_KEY = os.getenv("OMNIROUTE_API")
-
 OPENROUTER_API_KEY = os.getenv("OPENROUTE_API")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
