@@ -1,12 +1,16 @@
 """
 main_test.py - Pipeline Completo de Extracción WVTR
 ====================================================
-Modelo: GPT 5.6 Luna (via OpenRouter)
+Modelo texto: GPT 5.6 Luna (via OpenRouter)
+Modelo imágenes: gate Gemini 2.5 Flash Lite → extracción GPT 5.6 Luna
 
 Pipeline:
   FASE 1: Cloudflare R2 → Download PDFs → Parse Markdown → Clean Regex
+          → extraer imágenes + outline.json → construir manifiesto
   FASE 2: Markdown → LLM (GPT 5.6 Luna) → JSON con registros WVTR
-  FASE 3: JSON → PostgreSQL (wvtr_data)
+          + manifiesto → filtro heurístico → gate visión → extracción visión
+          → reconciliación texto+imagen
+  FASE 3: JSON → PostgreSQL (wvtr_data) con columnas de procedencia
 
 Autor: Sebastian Sabogal
 """
@@ -56,6 +60,17 @@ from llm import parse_llm_json
 from monitoring import PerformanceMetrics, StructuredLogger
 from pdf_to_markdown import ConversionError, pdf_to_markdown
 from prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+from image_filter import filter_manifest, summarize as summarize_images
+from image_manifest import (
+    build_manifest,
+    load_manifest,
+    manifest_path_for,
+    page_sizes,
+    write_manifest,
+)
+from llm_vision import VISION_MAX_IMAGES_PER_DOC, extract_all
+from reconcile import reconcile
+from vision_gate import GATE_MODEL, gate_all, gate_cost_estimate, summarize_gates
 
 # ============================================
 # LOGGING
@@ -78,10 +93,18 @@ logger = logging.getLogger(__name__)
 # ============================================
 MODEL = "openai/gpt-5.6-luna"
 MAX_CONCURRENT_LLM = 10       # Archivos simultáneos al LLM
+MAX_CONCURRENT_GATE = 20      # Imágenes simultáneas al gate (llamadas pequeñas y baratas)
+MAX_CONCURRENT_VISION = 4     # Imágenes simultáneas a Luna detail=high (llamadas caras)
 MAX_WORKERS_DOWNLOAD = 5      # Workers paralelos para descarga
 MAX_RETRIES_LLM = 3           # Reintentos LLM por archivo
 BASE_DELAY = 5                # Delay base para retry
 BATCH_SIZE = 50               # Lotes de descarga desde R2
+
+#: Versión del extractor. El skip incremental compara este valor con el del JSON
+#: ya guardado: al subirlo, los papers extraídos con la versión anterior se
+#: reprocesan aunque su ETag no haya cambiado. Así una mejora del pipeline nunca
+#: queda atrapada en un resultado viejo.
+EXTRACTOR_VERSION = "v2-vision"
 
 # Directorios temporales
 TEMP_DIR = Path(__file__).parent / "temp"
@@ -105,6 +128,15 @@ llm_stats = {
     "total_tokens_out": 0,
     "total_records": 0,
     "start_time": None,
+    # Ruta de imágenes
+    "images_total": 0,
+    "images_heuristic_kept": 0,
+    "images_to_extract": 0,
+    "vision_records": 0,
+    "reconciled_corroborated": 0,
+    "reconciled_new_from_image": 0,
+    "gate_cost_usd": 0.0,
+    "vision_cost_usd": 0.0,
 }
 
 
@@ -183,10 +215,16 @@ def process_single_pdf(s3_client, pdf_key: str, errors: list) -> tuple:
     """
     Procesa un solo PDF desde R2:
     1. Descarga el PDF desde Cloudflare R2
-    2. Convierte PDF a Markdown (opendataloader_pdf)
+    2. Convierte PDF a Markdown (opendataloader_pdf, con imágenes)
     3. Extrae DOI del markdown crudo
     4. Limpia el markdown (remueve refs, headers, footers, noise)
     5. Guarda markdown limpio en temp/markdown_cleaned/
+    6. Construye el manifiesto de imágenes en temp/markdown/manifest/
+
+    El paso 6 va AQUÍ, y no en la Fase 2, por una razón concreta: el tamaño de
+    página (necesario para calcular area_ratio y las bandas header/footer) solo
+    se puede leer del PDF, y el PDF se borna en el `finally`. Capturear la
+    geometría ahora evita tener que conservarlo.
 
     Returns:
         (success: bool, cleaned_path: str, elapsed: float, pdf_key: str, doi: str)
@@ -199,8 +237,8 @@ def process_single_pdf(s3_client, pdf_key: str, errors: list) -> tuple:
         # Paso 1: Descargar PDF desde R2
         download_pdf(s3_client, pdf_key, local_pdf)
 
-        # Paso 2: Convertir PDF a Markdown
-        md_path = pdf_to_markdown(local_pdf, str(TEMP_MARKDOWN))
+        # Paso 2: Convertir PDF a Markdown (+ outline.json + imágenes)
+        md_path = pdf_to_markdown(local_pdf, str(TEMP_MARKDOWN), with_images=True)
 
         # Paso 3: Leer markdown crudo
         with open(md_path, "r", encoding="utf-8", errors="replace") as f:
@@ -217,6 +255,15 @@ def process_single_pdf(s3_client, pdf_key: str, errors: list) -> tuple:
         cleaned_path = TEMP_MARKDOWN_CLEANED / f"{nombre_md}.md"
         with open(cleaned_path, "w", encoding="utf-8") as f:
             f.write(cleaned_md)
+
+        # Paso 7: Manifiesto de imágenes (geométrica del PDF + stats de los PNG).
+        # Un fallo aquí NO invalida el documento: el pipeline sigue con solo texto.
+        try:
+            manifest = build_manifest(md_path, sizes=page_sizes(local_pdf))
+            write_manifest(md_path, manifest)
+            logger.info(f"  [{nombre_md}] manifiesto: {summarize_images(manifest)}")
+        except Exception as e:
+            logger.warning(f"  [{nombre_md}] manifiesto no se pudo construir: {e}")
 
         elapsed = round(time.time() - start, 1)
         return True, str(cleaned_path), elapsed, pdf_key, doi
@@ -272,10 +319,18 @@ def _adopt_with_artifacts(files: dict, dois: dict, key: str, etag):
             pass
 
 
+def _raw_markdown_path_for(pdf_key: str) -> Path:
+    return TEMP_MARKDOWN / f"{Path(pdf_key).stem}.md"
+
+
 def _invalidate_derived(pdf_key: str):
-    """Borra markdown limpio + JSON LLM de un PDF modificado."""
+    """Borra markdown limpio + JSON LLM + manifiesto de un PDF modificado."""
     for p in [_cleaned_path_for(pdf_key),
-              _result_path_for_md(_cleaned_path_for(pdf_key))]:
+              _result_path_for_md(_cleaned_path_for(pdf_key)),
+              # El manifiesto depende del outline.json y de los PNG; si el PDF
+              # cambió, dejar el manifiesto viejo haría pasar imágenes de la
+              # versión anterior por el gate.
+              manifest_path_for(_raw_markdown_path_for(pdf_key))]:
         try:
             if p.exists():
                 p.unlink()
@@ -385,40 +440,147 @@ def log_llm_progress(total: int):
         f"OK:{llm_stats['processed']} ERR:{llm_stats['errors']} SKIP:{llm_stats['skipped']} | "
         f"Tokens: {llm_stats['total_tokens_in']} in / {llm_stats['total_tokens_out']} out | "
         f"Registros WVTR: {llm_stats['total_records']} | "
+        f"Img: {llm_stats['images_total']} extraidas -> {llm_stats['images_to_extract']} a extraer, "
+        f"{llm_stats['vision_records']} registros | "
         f"Elapsed: {elapsed:.0f}s | ETA: {eta}"
     )
+
+
+async def process_images(client: AsyncOpenAI, md_path: Path, doi: str) -> dict:
+    """
+    Ruta de imágenes de un documento: manifiesto → heurística → gate → extracción.
+
+    Cada etapa responde a un criterio distinto, y saltarse cualquiera rompe el
+    resultado:
+      1. manifiesto: qué imágenes hay y dónde (gratis, del outline.json)
+      2. heurística: logos, filetes y fórmulas químicas no sonWVTR (gratis)
+      3. gate: ¿esta imagen *imprime* valores WVTR? (barato, y evita leer
+         gráficas de rheología o micrografías SEM)
+      4. extracción: solo tablas WVTR legibles, con el modelo bueno
+
+    Cualquier fallo en 2-4 degrada a "solo texto" en vez de tumbar el documento:
+    perder la tabla de un paper es malo, pero perder los 30 registros de texto
+    del mismo paper es peor.
+
+    Returns:
+        dict con métricas y los registros extraídos de imagen (``image_records``).
+    """
+    meta = {"images_total": 0, "images_heuristic_kept": 0, "images_gated_in": 0,
+            "images_extracted": 0, "vision_records": 0, "gate_cost_usd": 0.0,
+            "vision_cost_usd": 0.0, "image_records": [], "gate_failures": 0}
+
+    raw_md_path = TEMP_MARKDOWN / md_path.name
+    manifest = load_manifest(raw_md_path)
+    meta["images_total"] = len(manifest)
+    llm_stats["images_total"] += len(manifest)
+    if not manifest:
+        return meta
+
+    summary = summarize_images(manifest)
+    candidates, reasons = filter_manifest(manifest)
+    meta["images_heuristic_kept"] = len(candidates)
+    meta["heuristic_drops"] = reasons
+    llm_stats["images_heuristic_kept"] += len(candidates)
+    logger.info(
+        "[IMAGES] %s: %d extraidas, %d tras heuristica (drops=%s), "
+        "page_sizes=%d/%d, con contexto=%d",
+        md_path.name, summary["images_total"], len(candidates), reasons,
+        summary["with_page_size"], summary["with_context"],
+    )
+    if not candidates:
+        return meta
+
+    # ── Gate: barato, decide a quién se leen los dígitos ──
+    try:
+        gates, gate_failures, gate_stats = await gate_all(
+            client, candidates, doi, concurrency=MAX_CONCURRENT_GATE
+        )
+    except Exception as e:
+        logger.error(f"[IMAGES] gate fallo total en {md_path.name}: {e}")
+        return meta
+
+    meta["gate_failures"] = len(gate_failures)
+    meta["gate"] = {**gate_stats, **summarize_gates(gates)}
+    meta["gate_cost_usd"] = round(gate_cost_estimate(gate_stats), 6)
+    meta["gate_verdicts"] = [g.to_dict() for g in gates]
+    llm_stats["gate_cost_usd"] += meta["gate_cost_usd"]
+    llm_stats["images_to_extract"] += gate_stats["gate_to_extract"]
+    logger.info(f"[IMAGES] gate: {gate_stats} | costo=${meta['gate_cost_usd']:.6f}")
+
+    to_extract = [g.candidate for g in gates if g.should_extract]
+    if not to_extract:
+        logger.info(f"[IMAGES] {md_path.name}: el gate no selecciono ninguna tabla WVTR")
+        return meta
+
+    # ── Extracción con el modelo bueno, solo sobre las seleccionadas ──
+    extractions, vision_stats = await extract_all(
+        client, to_extract, doi, concurrency=MAX_CONCURRENT_VISION
+    )
+    image_records = [r for e in extractions for r in e.records]
+    meta.update(vision_stats)
+    meta["images_extracted"] = len(to_extract)
+    meta["extractions"] = [e.to_dict() for e in extractions]
+    # Luna: $0.20/$1.20 por 1M tokens.
+    meta["vision_cost_usd"] = round(
+        (vision_stats["vision_tokens_in"] * 0.20
+         + vision_stats["vision_tokens_out"] * 1.20) / 1e6, 6
+    )
+    llm_stats["vision_cost_usd"] += meta["vision_cost_usd"]
+    llm_stats["vision_records"] += vision_stats["vision_records"]
+    meta["image_records"] = image_records
+
+    logger.info(
+        "[IMAGES] %s: %d imagenes -> %d registros | vision %d in / %d out "
+        "tokens | costo=$%.6f",
+        md_path.name, len(to_extract), len(image_records),
+        vision_stats["vision_tokens_in"], vision_stats["vision_tokens_out"],
+        meta["vision_cost_usd"],
+    )
+    if len(to_extract) > VISION_MAX_IMAGES_PER_DOC:
+        logger.info(
+            "[IMAGES] %s: tope de %d imagenes/documento aplicado (el gate dejó "
+            "pasar %d)", md_path.name, VISION_MAX_IMAGES_PER_DOC, len(to_extract)
+        )
+    return meta
 
 
 async def process_file(client: AsyncOpenAI, semaphore: asyncio.Semaphore,
                        md_path: Path, doi: str, pdf_key: str, etag: str, total: int) -> dict:
     """
-    Procesa un solo markdown con el LLM:
+    Procesa un solo markdown con el LLM (texto + imágenes):
     1. Lee el contenido del markdown
     2. Construye el prompt (system + user)
     3. Envía a GPT 5.6 Luna via OpenRouter
     4. Parsea la respuesta JSON
-    5. Guarda el resultado en temp/results/
+    5. Ruta de imágenes: manifiesto → filtro heurístico → gate visión barato
+       → extracción con Luna solo de las tablas WVTR legibles
+    6. Reconcilia texto + imagen y guarda en temp/results/
 
     Returns:
         dict con el resultado del LLM o error
     """
     out_path = TEMP_RESULTS / f"{md_path.stem}__gpt-5.6-luna.json"
 
-    # Si ya existe un resultado vigente para este ETag, actualizar DOI si falta y saltarlo
+    # Un resultado solo se reutiliza si su ETag coincide Y fue producido por la
+    # versión actual del extractor. Sin lo segundo, un paper ya extraído con la
+    # versión solo-texto se saltaría para siempre y nunca se beneficiaría de la
+    # ruta de imágenes.
     if out_path.exists():
         try:
             existing_data = json.loads(out_path.read_text(encoding="utf-8"))
         except Exception:
             existing_data = None
-        if existing_data and existing_data.get("_meta", {}).get("etag") == etag:
-            if existing_data.get("_meta", {}).get("doi") is None and doi:
-                existing_data["_meta"]["doi"] = doi
+        existing_meta = (existing_data or {}).get("_meta", {})
+        if (existing_data and existing_meta.get("etag") == etag
+                and existing_meta.get("extractor_version") == EXTRACTOR_VERSION):
+            if existing_meta.get("doi") is None and doi:
+                existing_meta["doi"] = doi
                 out_path.write_text(json.dumps(existing_data, indent=2, ensure_ascii=False), encoding="utf-8")
-            logger.info(f"[SKIP] {md_path.name} (resultado vigente)")
+            logger.info(f"[SKIP] {md_path.name} (resultado vigente, {EXTRACTOR_VERSION})")
             llm_stats["skipped"] += 1
             log_llm_progress(total)
             return existing_data
-        # Resultado obsoleto o corrupto: se regenera abajo
+        # Resultado obsoleto, de otra versión o corrupto: se regenera abajo
 
     # Leer contenido del markdown
     content = md_path.read_text(encoding="utf-8", errors="replace")
@@ -496,10 +658,38 @@ async def process_file(client: AsyncOpenAI, semaphore: asyncio.Semaphore,
         result = parse_llm_json(raw)
         n_registros = len(result.get("registros", []))
         llm_stats["total_records"] += n_registros
-        logger.info(f"[PARSE OK] {md_path.name}: {n_registros} registros WVTR extraidos")
+        logger.info(f"[PARSE OK] {md_path.name}: {n_registros} registros WVTR del texto")
     except Exception as e:
         logger.warning(f"[PARSE ERROR] {md_path.name}: {e}")
         result = {"file": md_path.name, "parse_error": str(e), "raw": raw}
+
+    # ============================================
+    # RUTA DE IMÁGENES
+    # ============================================
+    # Va dentro de process_file (no como fase aparte) para que comparta el
+    # semáforo, el cliente y el skip incremental ya resueltos arriba.
+    image_meta = await process_images(client, md_path, doi)
+
+    # ============================================
+    # RECONCILIACIÓN
+    # ============================================
+    text_records = result.get("registros") or []
+    image_records = image_meta.pop("image_records", [])
+    merged_records, rec_stats = reconcile(text_records, image_records)
+    result["registros"] = merged_records
+    llm_stats["total_records"] -= len(text_records)          # se recalcula abajo
+    llm_stats["total_records"] += len(merged_records)
+    llm_stats["reconciled_corroborated"] += rec_stats.corroborated
+    llm_stats["reconciled_new_from_image"] += sum(
+        1 for r in merged_records if r.get("source_kind") == "image"
+    )
+    logger.info(
+        "[RECONCILE] %s: texto=%d imagen=%d -> final=%d (corroborados=%d, "
+        "colapsados=%d, rellenados desde imagen=%d)",
+        md_path.name, rec_stats.text_records, rec_stats.image_records,
+        len(merged_records), rec_stats.corroborated,
+        rec_stats.duplicates_dropped, rec_stats.fields_filled_from_image,
+    )
 
     # Agregar metadata al resultado
     result["_meta"] = {
@@ -510,6 +700,9 @@ async def process_file(client: AsyncOpenAI, semaphore: asyncio.Semaphore,
         "doi": doi,
         "pdf_key": pdf_key,
         "etag": etag,
+        "extractor_version": EXTRACTOR_VERSION,
+        "images": image_meta,
+        "reconcile": rec_stats.to_dict(),
     }
 
     # Guardar JSON
@@ -567,7 +760,8 @@ async def run_phase_2(dois: dict, files: dict = None) -> list:
         return []
 
     total = len(md_files)
-    logger.info(f"Modelo: {MODEL}")
+    logger.info(f"Modelo texto: {MODEL}")
+    logger.info(f"Gate imágenes: {GATE_MODEL} | Tope img/doc: {VISION_MAX_IMAGES_PER_DOC}")
     logger.info(f"Archivos: {total} (ordenados por tamaño)")
     logger.info(f"Concurrencia: {MAX_CONCURRENT_LLM}")
     logger.info(f"Max reintentos: {MAX_RETRIES_LLM}")
@@ -606,6 +800,17 @@ async def run_phase_2(dois: dict, files: dict = None) -> list:
     logger.info(f"Saltados:    {llm_stats['skipped']}")
     logger.info(f"Registros:   {llm_stats['total_records']} WVTR")
     logger.info(f"Tokens:      {llm_stats['total_tokens_in']} in / {llm_stats['total_tokens_out']} out")
+    logger.info("-" * 50)
+    logger.info("RUTA DE IMAGENES")
+    logger.info(f"  Imágenes extraídas:  {llm_stats['images_total']}")
+    logger.info(f"  Tras heurística:    {llm_stats['images_heuristic_kept']}")
+    logger.info(f"  Seleccionadas gate: {llm_stats['images_to_extract']}")
+    logger.info(f"  Registros de imagen:{llm_stats['vision_records']:>6}")
+    logger.info(f"  Corroborados:       {llm_stats['reconciled_corroborated']}")
+    logger.info(f"  Nuevos de imagen:   {llm_stats['reconciled_new_from_image']}")
+    logger.info(f"  Costo gate:         ${llm_stats['gate_cost_usd']:.4f}")
+    logger.info(f"  Costo visión:       ${llm_stats['vision_cost_usd']:.4f}")
+    logger.info("-" * 50)
     logger.info(f"Tiempo:      {total_latency:.1f}s ({total_latency/60:.1f} min)")
     if llm_stats["processed"] > 0:
         logger.info(f"Promedio:    {total_latency/llm_stats['processed']:.1f}s/archivo")
