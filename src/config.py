@@ -3,8 +3,7 @@ import pathlib
 from dotenv import load_dotenv
 
 
-_config_dir = pathlib.Path(__file__).resolve().parent
-load_dotenv(_config_dir.parent / "API_KEY.env")
+load_dotenv(os.environ.get("WVTR_ENV_FILE", pathlib.Path.cwd() / "API_KEY.env"))
 
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTE_API")

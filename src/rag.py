@@ -82,7 +82,7 @@ def search_similar(query: str, limit: int = 10) -> list:
                 rh, thickness, test_method
             FROM wvtr_data
             WHERE embedding IS NOT NULL
-            ORDER BY embedding <-> %s
+            ORDER BY embedding <=> %s::vector
             LIMIT %s
         """, (str(query_embedding), fetch_limit))
         
@@ -137,7 +137,7 @@ def search_similar(query: str, limit: int = 10) -> list:
                         FROM wvtr_data
                         WHERE embedding IS NOT NULL
                           AND temperature ILIKE %s
-                        ORDER BY embedding <-> %s
+                        ORDER BY embedding <=> %s::vector
                         LIMIT 2
                     """, (f'%{mt}%', str(query_embedding)))
                     

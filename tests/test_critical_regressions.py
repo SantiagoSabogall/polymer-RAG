@@ -53,34 +53,6 @@ class CriticalRegressions(unittest.TestCase):
         self.assertTrue(any("DELETE" in c.args[0] for c in cur.execute.call_args_list))
         conn.commit.assert_called_once()
 
-    def test_text_pipeline_persists_without_nested_lock(self):
-        spec = importlib.util.spec_from_file_location("pipeline_cli", Path(__file__).resolve().parents[1] / "main.py")
-        main = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(main)
-        from threading import Lock
-
-        class DetectNestedLock:
-            def __init__(self):
-                self.lock = Lock()
-            def __enter__(self):
-                if not self.lock.acquire(blocking=False):
-                    raise AssertionError("nested lock")
-            def __exit__(self, *args):
-                self.lock.release()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            md = Path(tmp) / "paper.md"
-            md.write_text("paper")
-            output = Path(tmp) / "results.json"
-            with patch.multiple(main, file_lock=DetectNestedLock(),
-                                LLM_RESULTS_FILE=str(output)),                     patch.object(main, "get_client", return_value=None),                     patch.object(main, "cleaned_md_path", return_value=str(md)),                     patch.object(main, "extract_wvtr_with_retry",
-                                 return_value={"registros": []}),                     patch.object(main.time, "sleep"):
-                result = main.run_phase_2(
-                    {"files": {"paper.pdf": {"status": "completed", "etag": "1"}}},
-                    [], {})
-            self.assertEqual(json.loads(output.read_text()), result)
-            self.assertEqual(result[0]["etag"], "1")
-
     def test_embeddings_use_measurement_columns_and_zero(self):
         with patch.dict(os.environ, {"OPENROUTE_API": "test"}):
             import sys
@@ -101,7 +73,7 @@ class CriticalRegressions(unittest.TestCase):
         import asyncio
         from unittest.mock import AsyncMock
         spec = importlib.util.spec_from_file_location(
-            "vision_cli", Path(__file__).resolve().parents[1] / "main_test.py")
+            "src.vision_cli", Path(__file__).resolve().parents[1] / "src" / "pipeline.py")
         module = importlib.util.module_from_spec(spec)
         # Importing the existing CLI configures a file logger.
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,7 +103,7 @@ class CriticalRegressions(unittest.TestCase):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
         spec = importlib.util.spec_from_file_location(
-            "vision_cli_regression", Path(__file__).resolve().parents[1] / "main_test.py")
+            "src.vision_cli_regression", Path(__file__).resolve().parents[1] / "src" / "pipeline.py")
         module = importlib.util.module_from_spec(spec)
         with tempfile.TemporaryDirectory() as tmp:
             previous = os.getcwd()

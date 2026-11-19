@@ -153,7 +153,12 @@ def reconcile(text_records: list[dict], image_records: list[dict]) -> tuple[list
         ambiguous = any(not compatible(a, b) for a in peers for b in peers)
         if len(candidates) == 1 and not ambiguous:
             existing = candidates[0]
-            stats.duplicates_dropped += 1
+            # Una coincidencia entre texto e imagen es corroboración, no un
+            # duplicado descartado: ambas observaciones aportan procedencia.
+            # El contador de duplicados solo refleja filas repetidas dentro de
+            # la misma modalidad.
+            if existing.get("source_kind") == modality:
+                stats.duplicates_dropped += 1
             for field in _FIELDS:
                 if existing.get(field) in (None, "", "null"):
                     existing[field] = record.get(field)

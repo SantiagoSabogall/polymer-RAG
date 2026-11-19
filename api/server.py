@@ -148,9 +148,14 @@ def health_check():
 # EJECUTAR EL SERVIDOR
 # ============================================
 
-def main():
+def main(argv=None):
+    import argparse
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+    parser = argparse.ArgumentParser(description="API REST WVTR")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8001)
+    args = parser.parse_args(argv)
+    uvicorn.run(app, host=args.host, port=args.port)
 
 if __name__ == "__main__":
     main()

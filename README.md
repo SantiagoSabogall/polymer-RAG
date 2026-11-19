@@ -244,16 +244,50 @@ curl -X POST http://localhost:8001/query \
 
 ### 3.5 Benchmark Models
 
-Compare extraction performance across multiple LLMs:
+Run a model on the Markdown corpus. Each model writes an aggregate
+`results-<model hash>.json` under `temp/benchmark/`, with per-document caches
+keyed by input content, model and prompt. Failed responses are retried on the next run.
 
 ```bash
-uv run benchmark-run openai/gpt-5.6-luna
-uv run benchmark-run deepseek/deepseek-v4-flash-0731
-uv run benchmark-run google/gemini-3.8-flash
-uv run benchmark-run z-ai/glm-5.3-flash
-
-# Generate comparison Excel
+uv run benchmark-run openai/gpt-5.6-luna --input-dir benchmark/papers --output-dir temp/benchmark
+uv run benchmark-evaluate --results temp/benchmark/results-MODEL_HASH.json --ground-truth benchmark/ground_truth.json
 uv run python benchmark/generate_excel.py
+```
+
+Use the actual results path printed by the runner. Evaluation excludes papers without
+an explicit `expected` annotation and reports their names and coverage. An annotated
+empty list means the paper has no WVTR measurements. Matching requires polymer,
+verbatim units and a numeric value within 10% relative tolerance; field accuracy is
+reported separately. The supplied ground-truth file is an example and still needs
+annotations for the seven corpus papers. Zero evaluated papers returns exit status 1.
+
+### Pipeline entry points and installation
+
+`pipeline`, `python main.py`, `python main_test.py` and `python -m src.pipeline`
+invoke the same text-and-image pipeline. The existing phase flags remain available.
+`main.py` now includes the image route. Current progress stays in
+`temp/progress_test.json`, `temp/dois_test.json` and `temp/results/`.
+Older `main.py` files such as `progress.json` are retained; their text-only results
+are not automatically certified as current image extractions.
+
+```bash
+pipeline --phase 1 --dry-run
+pipeline --phase 1
+pipeline --phase 2
+pipeline --phase 3 --no-prune
+```
+
+By default, data is stored under `./temp` and credentials are read from
+`./API_KEY.env`, relative to the working directory. Set `WVTR_DATA_DIR`
+and `WVTR_ENV_FILE` to absolute paths when running from another directory.
+Environment variables take precedence over the credential file.
+
+```bash
+uv build
+uv pip install dist/wvtr_extraction-1.3.0-py3-none-any.whl
+pipeline --help
+benchmark-run --help
+benchmark-evaluate --help
 ```
 
 ### 3.6 Services Summary
@@ -367,8 +401,8 @@ polymer-RAG/
 ├── docker/                       # Docker configuration
 │   ├── init.sql                  # Database schema initialization
 │   └── Dockerfile.postgres       # Custom PostgreSQL image
-├── main_test.py                  # Main pipeline entry point
-├── main.py                       # Alternative pipeline (text only)
+├── main_test.py                  # Compatibility entry point for src.pipeline
+├── main.py                       # Compatibility entry point for src.pipeline
 ├── docker-compose.yml            # Docker services
 ├── .env                          # Docker variables (gitignored)
 ├── API_KEY.env                   # Python credentials (gitignored)

@@ -1,204 +1,144 @@
-import json
-import os
+"""Evalúa predicciones contra artículos anotados, con cobertura explícita."""
 
-BENCHMARK_DIR = os.path.dirname(__file__)
-RESULTS_FILE = os.path.join(BENCHMARK_DIR, "results.json")
-GROUND_TRUTH_FILE = os.path.join(BENCHMARK_DIR, "ground_truth.json")
+import argparse
+import json
+import math
+from pathlib import Path
 
 
 def fuzzy_match(a, b):
     if a is None or b is None:
         return a == b
-    a_str = str(a).strip().lower()
-    b_str = str(b).strip().lower()
-    return a_str == b_str
+    return str(a).strip().casefold() == str(b).strip().casefold()
 
 
-def normalize_number(val):
-    if val is None:
+def normalize_number(value):
+    if isinstance(value, bool):
         return None
     try:
-        return float(val)
+        number = float(value)
+        return number if math.isfinite(number) else None
     except (ValueError, TypeError):
         return None
 
 
-def matchRegistro(reg, expected):
-    score = 0
-    total = 0
-
-    if fuzzy_match(reg.get("polymer"), expected.get("polymer")):
-        score += 1
-    total += 1
-
-    reg_val = normalize_number(reg.get("wvtr_value"))
-    exp_val = normalize_number(expected.get("wvtr_value"))
-    if reg_val is not None and exp_val is not None:
-        if abs(reg_val - exp_val) / max(abs(exp_val), 0.001) < 0.1:
-            score += 1
-    elif reg_val == exp_val:
-        score += 1
-    total += 1
-
-    for field in ["wvtr_units", "temperature", "rh", "thickness", "test_method"]:
-        if fuzzy_match(reg.get(field), expected.get(field)):
-            score += 1
-        total += 1
-
-    return score / total if total > 0 else 0
+def same_measurement(record, expected):
+    """Exige polímero, unidades y valor; tolerancia relativa de 10 % heredada."""
+    if not record.get("polymer") or not record.get("wvtr_units"):
+        return False
+    if not all(fuzzy_match(record.get(field), expected.get(field))
+               for field in ("polymer", "wvtr_units")):
+        return False
+    value, target = normalize_number(record.get("wvtr_value")), normalize_number(expected.get("wvtr_value"))
+    return (value is not None and target is not None
+            and abs(value - target) <= max(abs(target) * 0.1, 1e-9))
 
 
-def evaluate_paper(result_entry, expected_list):
-    if not result_entry.get("success") or result_entry.get("result") is None:
-        return {
-            "json_valid": False,
-            "schema_compliant": False,
-            "recall": 0.0,
-            "precision": 0.0,
-            "field_accuracy": 0.0,
-            "n_expected": len(expected_list),
-            "n_found": 0,
-        }
+def matchRegistro(record, expected):
+    fields = ("polymer", "wvtr_units", "temperature", "rh", "thickness", "test_method")
+    score = sum(fuzzy_match(record.get(field), expected.get(field)) for field in fields)
+    return (score + int(same_measurement(record, expected))) / 7
 
-    result = result_entry["result"]
-    registros = result.get("registros", [])
 
-    json_valid = True
+def evaluate_paper(entry, expected_list):
+    result = entry.get("result")
+    schema_ok = (
+        entry.get("success") and isinstance(result, dict)
+        and isinstance(result.get("article_title"), str)
+        and isinstance(result.get("registros"), list)
+        and all(isinstance(r, dict) and isinstance(r.get("polymer"), str)
+                and bool(r["polymer"].strip()) and isinstance(r.get("wvtr_units"), str)
+                and bool(r["wvtr_units"].strip()) and normalize_number(r.get("wvtr_value")) is not None
+                for r in result["registros"])
+    )
+    records = result["registros"] if schema_ok else []
+    # Maximum bipartite matching prevents a greedy match from hiding a valid pair.
+    candidates = [
+        sorted((i for i, r in enumerate(records) if same_measurement(r, exp)),
+               key=lambda i: matchRegistro(records[i], exp), reverse=True)
+        for exp in expected_list
+    ]
+    assigned = {}
 
-    schema_ok = "article_title" in result and "registros" in result
-    if schema_ok:
-        for reg in registros:
-            if "polymer" not in reg or "wvtr_value" not in reg:
-                schema_ok = False
-                break
-
-    if not expected_list:
-        return {
-            "json_valid": json_valid,
-            "schema_compliant": schema_ok,
-            "recall": 1.0 if not registros else 0.0,
-            "precision": 0.0,
-            "field_accuracy": 1.0,
-            "n_expected": 0,
-            "n_found": len(registros),
-        }
-
-    matched = []
-    used = set()
-    for exp in expected_list:
-        best_score = 0
-        best_idx = -1
-        for i, reg in enumerate(registros):
-            if i in used:
+    def assign(expected_index, visited):
+        for record_index in candidates[expected_index]:
+            if record_index in visited:
                 continue
-            s = matchRegistro(reg, exp)
-            if s > best_score:
-                best_score = s
-                best_idx = i
-        if best_idx >= 0:
-            matched.append(best_score)
-            used.add(best_idx)
+            visited.add(record_index)
+            if record_index not in assigned or assign(assigned[record_index], visited):
+                assigned[record_index] = expected_index
+                return True
+        return False
 
-    recall = len(matched) / len(expected_list) if expected_list else 1.0
-    precision = len(matched) / len(registros) if registros else 0.0
-    field_accuracy = sum(matched) / len(matched) if matched else 0.0
-
+    for index in range(len(expected_list)):
+        assign(index, set())
+    matched = len(assigned)
+    correct_empty = bool(schema_ok and not records and not expected_list)
     return {
-        "json_valid": json_valid,
-        "schema_compliant": schema_ok,
-        "recall": round(recall, 3),
-        "precision": round(precision, 3),
-        "field_accuracy": round(field_accuracy, 3),
-        "n_expected": len(expected_list),
-        "n_found": len(registros),
+        "json_valid": bool(entry.get("success") and isinstance(result, dict)),
+        "schema_compliant": bool(schema_ok),
+        "recall": round(matched / len(expected_list), 3) if expected_list else float(correct_empty),
+        "precision": round(matched / len(records), 3) if records else float(correct_empty),
+        "field_accuracy": round(sum(matchRegistro(records[r], expected_list[e])
+                                    for r, e in assigned.items()) / matched, 3) if matched else float(correct_empty),
+        "n_expected": len(expected_list), "n_found": len(records),
     }
 
 
-def run_evaluation():
-    if not os.path.exists(RESULTS_FILE):
-        print("No existe results.json. Ejecuta run_benchmark.py primero.")
-        return
-
-    if not os.path.exists(GROUND_TRUTH_FILE):
-        print("No existe ground_truth.json.")
-        print("Crea el archivo con los valores esperados para cada paper.")
-        print("Ejemplo:")
-        print(json.dumps({
-            "paper_1.md": {
-                "expected": [
-                    {
-                        "polymer": "EVOH",
-                        "wvtr_value": 4.5,
-                        "wvtr_units": "g/m2/day",
-                        "temperature": "38C",
-                        "rh": "90%",
-                        "thickness": "15 um",
-                        "test_method": "ASTM F1249"
-                    }
-                ]
-            }
-        }, indent=2))
-        return
-
-    with open(RESULTS_FILE, "r", encoding="utf-8") as f:
-        results = json.load(f)
-
-    with open(GROUND_TRUTH_FILE, "r", encoding="utf-8") as f:
-        ground_truth = json.load(f)
-
+def evaluate_results(results, truth):
     summary = {}
-
-    for model_name, model_results in results.items():
-        model_scores = []
-
-        for entry in model_results:
-            paper_name = entry["paper"]
-            expected = ground_truth.get(paper_name, {}).get("expected", [])
-
-            scores = evaluate_paper(entry, expected)
-            scores["paper"] = paper_name
-            scores["cost"] = entry.get("cost", 0)
-            scores["latency"] = entry.get("latency", 0)
-            model_scores.append(scores)
-
-        if not model_scores:
-            continue
-
-        avg = {
-            "json_valid_rate": sum(s["json_valid"] for s in model_scores) / len(model_scores),
-            "schema_compliance_rate": sum(s["schema_compliant"] for s in model_scores) / len(model_scores),
-            "avg_recall": sum(s["recall"] for s in model_scores) / len(model_scores),
-            "avg_precision": sum(s["precision"] for s in model_scores) / len(model_scores),
-            "avg_field_accuracy": sum(s["field_accuracy"] for s in model_scores) / len(model_scores),
-            "total_cost": sum(s["cost"] for s in model_scores),
-            "avg_latency": sum(s["latency"] for s in model_scores) / len(model_scores),
-            "papers": model_scores,
+    for model, entries in results.items():
+        scores, unannotated = [], []
+        for entry in entries:
+            paper = entry["paper"]
+            annotation = truth.get(paper)
+            if not isinstance(annotation, dict) or "expected" not in annotation:
+                unannotated.append(paper)
+                continue
+            expected = annotation["expected"]
+            if not isinstance(expected, list) or any(
+                    not isinstance(row, dict) or not row.get("polymer")
+                    or not row.get("wvtr_units") or normalize_number(row.get("wvtr_value")) is None
+                    for row in expected):
+                raise ValueError(f"Anotación inválida para {paper}")
+            score = evaluate_paper(entry, expected)
+            scores.append({"paper": paper, **score})
+        aggregate = {
+            "evaluated_papers": len(scores), "total_papers": len(entries),
+            "unannotated_papers": unannotated, "papers": scores,
         }
-        summary[model_name] = avg
+        for field in ("recall", "precision", "field_accuracy", "schema_compliant", "json_valid"):
+            aggregate[f"avg_{field}"] = (
+                round(sum(s[field] for s in scores) / len(scores), 3) if scores else None)
+        summary[model] = aggregate
+    return summary
 
-    eval_file = os.path.join(BENCHMARK_DIR, "evaluation.json")
-    with open(eval_file, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
 
-    print("\n" + "=" * 80)
-    print("  RESULTADOS DEL BENCHMARK")
-    print("=" * 80)
-    print(f"{'Modelo':<20} {'JSON':>6} {'Schema':>8} {'Recall':>8} {'Precision':>10} {'Accuracy':>10} {'Cost':>10} {'Latency':>8}")
-    print("-" * 80)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--results", type=Path, default=Path("benchmark/results.json"))
+    parser.add_argument("--ground-truth", type=Path, default=Path("benchmark/ground_truth.json"))
+    parser.add_argument("--output", type=Path, default=Path("temp/benchmark/evaluation.json"))
+    args = parser.parse_args(argv)
+    try:
+        results = json.loads(args.results.read_text(encoding="utf-8"))
+        truth = json.loads(args.ground_truth.read_text(encoding="utf-8"))
+        summary = evaluate_results(results, truth)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        parser.error(str(exc))
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    for model, metrics in summary.items():
+        print(f"{model}: {metrics['evaluated_papers']}/{metrics['total_papers']} artículos evaluados; "
+              f"recall={metrics['avg_recall']}, precision={metrics['avg_precision']}")
+        if metrics["unannotated_papers"]:
+            print("Sin anotación: " + ", ".join(metrics["unannotated_papers"]))
+    return 0 if any(m["evaluated_papers"] for m in summary.values()) else 1
 
-    for model_name, avg in summary.items():
-        print(f"{model_name:<20} "
-              f"{avg['json_valid_rate']*100:>5.0f}% "
-              f"{avg['schema_compliance_rate']*100:>7.0f}% "
-              f"{avg['avg_recall']:>7.3f} "
-              f"{avg['avg_precision']:>9.3f} "
-              f"{avg['avg_field_accuracy']:>9.3f} "
-              f"${avg['total_cost']:>9.4f} "
-              f"{avg['avg_latency']:>7.1f}s")
 
-    print("=" * 80)
-    print(f"\nEvaluación guardada en: {eval_file}")
+def run_evaluation():
+    return main([])
 
 
 if __name__ == "__main__":
-    run_evaluation()
+    raise SystemExit(main())

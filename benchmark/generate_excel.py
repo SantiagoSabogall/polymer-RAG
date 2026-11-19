@@ -5,8 +5,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
-RESULTS_DIR = Path(__file__).resolve().parent.parent / "temp" / "results"
-OUTPUT_FILE = Path(__file__).resolve().parent.parent / "temp" / "benchmark_results.xlsx"
+RESULTS_DIR = Path.cwd() / "temp" / "benchmark"
+OUTPUT_FILE = Path.cwd() / "temp" / "benchmark_results.xlsx"
 
 MODELS = [
     ("deepseek-v4-flash-0731", "DeepSeek V4 Flash"),
@@ -32,10 +32,19 @@ LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
 def load_model_results(model_id: str) -> dict:
     results = {}
-    for json_file in sorted(RESULTS_DIR.glob(f"*__{model_id}.json")):
-        article_name = json_file.stem.replace(f"__{model_id}", "")
-        data = json.loads(json_file.read_text())
-        results[article_name] = data
+    for json_file in sorted(RESULTS_DIR.glob("results-*.json")):
+        data = json.loads(json_file.read_text(encoding="utf-8"))
+        for model, entries in data.items():
+            if model.split("/")[-1] != model_id:
+                continue
+            for entry in entries:
+                if entry.get("success"):
+                    results[entry["paper"]] = {
+                        **entry["result"],
+                        "_meta": {"latency": entry.get("latency"),
+                                  "tokens_in": entry.get("tokens_input", 0),
+                                  "tokens_out": entry.get("tokens_output", 0)},
+                    }
     return results
 
 

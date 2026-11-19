@@ -24,6 +24,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -56,7 +57,7 @@ logger = logging.getLogger(__name__)
 #   gemini-2.5-flash-lite                -> $0.000106, clasifica bien, 0 tokens
 #       de razonamiento. Mismo precio, mucha mas precision: gana.
 GATE_MODEL = "google/gemini-2.5-flash-lite"   # $0.10 / $0.40 por 1M tokens
-GATE_CACHE_DIR = Path("temp/image_gate")
+GATE_CACHE_DIR = Path(os.environ.get("WVTR_DATA_DIR", Path.cwd() / "temp")) / "image_gate"
 GATE_MAX_TOKENS = 300
 GATE_MAX_RETRIES = 3
 GATE_BASE_DELAY = 5

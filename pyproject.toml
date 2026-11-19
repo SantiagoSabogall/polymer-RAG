@@ -53,10 +53,11 @@ all = [
 ]
 
 [project.scripts]
-pipeline = "main:main"
+pipeline = "src.pipeline:main"
 api-server = "api.server:main"
 embeddings = "scripts.generate_embeddings:main"
 benchmark-run = "benchmark.run_model:main"
+benchmark-evaluate = "benchmark.evaluate:main"
 
 [project.urls]
 Homepage = "https://github.com/SantiagoSabogall/polymer-RAG"
