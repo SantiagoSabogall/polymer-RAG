@@ -59,7 +59,7 @@ def generate_record_text(record: dict) -> str:
     if record.get("polymer"):
         parts.append(f"Polymer: {record['polymer']}")
     
-    if record.get("wvtr_value"):
+    if record.get("wvtr_value") is not None:
         parts.append(f"WVTR: {record['wvtr_value']}")
     
     if record.get("wvtr_units"):

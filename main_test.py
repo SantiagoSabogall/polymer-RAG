@@ -104,7 +104,7 @@ BATCH_SIZE = 50               # Lotes de descarga desde R2
 #: ya guardado: al subirlo, los papers extraídos con la versión anterior se
 #: reprocesan aunque su ETag no haya cambiado. Así una mejora del pipeline nunca
 #: queda atrapada en un resultado viejo.
-EXTRACTOR_VERSION = "v2-vision"
+EXTRACTOR_VERSION = "v3-vision"
 
 # Directorios temporales
 TEMP_DIR = Path(__file__).parent / "temp"
@@ -485,7 +485,7 @@ async def process_images(client: AsyncOpenAI, md_path: Path, doi: str) -> dict:
         "[IMAGES] %s: %d extraidas, %d tras heuristica (drops=%s), "
         "page_sizes=%d/%d, con contexto=%d",
         md_path.name, summary["images_total"], len(candidates), reasons,
-        summary["with_page_size"], summary["with_context"],
+        summary["with_page_size"], len(manifest), summary["with_context"],
     )
     if not candidates:
         return meta
@@ -571,7 +571,9 @@ async def process_file(client: AsyncOpenAI, semaphore: asyncio.Semaphore,
         except Exception:
             existing_data = None
         existing_meta = (existing_data or {}).get("_meta", {})
-        if (existing_data and existing_meta.get("etag") == etag
+        if (existing_data and "parse_error" not in existing_data
+                and "error" not in existing_data and etag is not None
+                and existing_meta.get("etag") == etag
                 and existing_meta.get("extractor_version") == EXTRACTOR_VERSION):
             if existing_meta.get("doi") is None and doi:
                 existing_meta["doi"] = doi
@@ -657,7 +659,6 @@ async def process_file(client: AsyncOpenAI, semaphore: asyncio.Semaphore,
     try:
         result = parse_llm_json(raw)
         n_registros = len(result.get("registros", []))
-        llm_stats["total_records"] += n_registros
         logger.info(f"[PARSE OK] {md_path.name}: {n_registros} registros WVTR del texto")
     except Exception as e:
         logger.warning(f"[PARSE ERROR] {md_path.name}: {e}")
@@ -677,8 +678,6 @@ async def process_file(client: AsyncOpenAI, semaphore: asyncio.Semaphore,
     image_records = image_meta.pop("image_records", [])
     merged_records, rec_stats = reconcile(text_records, image_records)
     result["registros"] = merged_records
-    llm_stats["total_records"] -= len(text_records)          # se recalcula abajo
-    llm_stats["total_records"] += len(merged_records)
     llm_stats["reconciled_corroborated"] += rec_stats.corroborated
     llm_stats["reconciled_new_from_image"] += sum(
         1 for r in merged_records if r.get("source_kind") == "image"
@@ -709,6 +708,7 @@ async def process_file(client: AsyncOpenAI, semaphore: asyncio.Semaphore,
     out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     logger.info(f"[DONE] {md_path.name} en {latency:.1f}s -> {out_path.name}")
 
+    llm_stats["total_records"] += len(merged_records)
     llm_stats["processed"] += 1
     log_llm_progress(total)
     return result
@@ -739,7 +739,8 @@ async def run_phase_2(dois: dict, files: dict = None) -> list:
 
     # Solo markdowns cuyo resultado no esté vigente para su ETag
     md_files = []
-    for md in sorted(TEMP_MARKDOWN_CLEANED.glob("*.md"), key=lambda f: f.stat().st_size):
+    available_markdowns = sorted(TEMP_MARKDOWN_CLEANED.glob("*.md"), key=lambda f: f.stat().st_size)
+    for md in available_markdowns:
         mapping = key_by_stem.get(md.stem)
         out_path = _result_path_for_md(md)
         if mapping is None:
@@ -747,16 +748,22 @@ async def run_phase_2(dois: dict, files: dict = None) -> list:
         _, etag, _ = mapping
         if out_path.exists():
             try:
-                meta = json.loads(out_path.read_text(encoding="utf-8")).get("_meta", {})
+                cached = json.loads(out_path.read_text(encoding="utf-8"))
+                meta = cached.get("_meta", {})
             except Exception:
                 meta = {}
-            if meta.get("etag") == etag and out_path.stat().st_size > 0:
+            if (etag is not None and meta.get("etag") == etag
+                    and meta.get("extractor_version") == EXTRACTOR_VERSION
+                    and "error" not in cached and "parse_error" not in cached):
                 llm_stats["skipped"] += 1
                 continue
         md_files.append(md)
 
     if not md_files:
-        logger.error(f"No se encontraron markdowns en {TEMP_MARKDOWN_CLEANED}")
+        if available_markdowns:
+            logger.info("Sin extracciones pendientes. Resultados reutilizados: %d", llm_stats["skipped"])
+        else:
+            logger.warning("No hay archivos Markdown en %s", TEMP_MARKDOWN_CLEANED)
         return []
 
     total = len(md_files)
@@ -979,18 +986,29 @@ def main(argv=None):
         for fp in sorted(TEMP_RESULTS.glob("*.json")):
             try:
                 data = json.loads(fp.read_text(encoding="utf-8"))
-                if data.get("registros") is not None:
+                meta = data.get("_meta", {})
+                entry = progress.get("files", {}).get(meta.get("pdf_key"), {})
+                current_keys = {obj["key"] for obj in r2_objects}
+                if (meta.get("pdf_key") in current_keys
+                        and entry.get("status") == "completed"
+                        and entry.get("etag") is not None
+                        and meta.get("etag") == entry.get("etag")
+                        and meta.get("extractor_version") == EXTRACTOR_VERSION
+                        and isinstance(data.get("registros"), list)
+                        and "error" not in data and "parse_error" not in data):
                     llm_results.append(data)
             except Exception:
                 continue
-    if args.phase in ("1", "2", "all") and not args.dry_run:
+    if args.phase in ("2", "all") and not args.dry_run:
         # Ejecutar FASE 2 (async)
         performance_metrics.start_phase("phase2")
         # run_phase_2 filtra por ETag; los ya cargados se conservan
         new_results = asyncio.run(run_phase_2(dois, progress.get("files", {})))
-        seen = {r.get("_meta", {}).get("pdf_key") for r in llm_results}
         for r in new_results:
-            if isinstance(r, dict) and r.get("_meta", {}).get("pdf_key") not in seen:
+            if isinstance(r, dict) and r.get("_meta", {}).get("pdf_key"):
+                key = r["_meta"]["pdf_key"]
+                llm_results = [old for old in llm_results
+                               if old.get("_meta", {}).get("pdf_key") != key]
                 llm_results.append(r)
         performance_metrics.end_phase("phase2")
         performance_metrics.metrics["phase2"]["pdfs_processed"] = llm_stats["processed"]

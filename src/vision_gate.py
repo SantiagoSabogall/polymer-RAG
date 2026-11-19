@@ -24,7 +24,7 @@ import base64
 import hashlib
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
@@ -125,7 +125,7 @@ class GateResult:
         return {
             "name": self.candidate.name,
             "page": self.candidate.page,
-            "model_verdict": asdict(self.verdict),
+            "model_verdict": self.verdict.model_dump(),
             "should_extract": self.should_extract,
             "cached": self.cached,
             "tokens_in": self.tokens_in,

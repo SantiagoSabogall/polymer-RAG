@@ -1,27 +1,4 @@
-"""reconcile.py — Fusión de los registros de texto con los de imagen.
-
-El problema que resuelve: una tabla WVTR rasterizada puede aparecer **también**
-en el flujo de texto (si opendataloader logró vectorizarla como HTML, o si los
-píxeles tienen capa de texto). Sin reconciliación, el mismo valor entra dos
-veces y ``replace_document`` inserta filas duplicadas: la base de datos deja de
-ser fiable para meta-análisis.
-
-Estrategia: una identidad por *medición*, no por fila.
-
-    identidad = (polymer normalizado, valor normalizado, unidades normalizadas)
-
-Se eligen esos tres campos porque son los que definen qué se midió. La
-temperatura, RH, espesor y método **no** forman parte de la identidad a
-propósito: son metadatos que una de las dos rutas puede tener más completos, y
-unificarlos en vez de duplicarlos es lo correcto.
-
-Reglas de fusión, en orden:
-1. Si la imagen y el texto coinciden en identidad → una sola fila, se conserva
-   la de texto (más fiable: no hay OCR de por medio), se rellenan sus campos
-   vacíos con los de la imagen, y se marca ``corroborated``.
-2. Si solo hay imagen → entra con ``source_kind='image'``.
-3. Duplicados dentro de la misma ruta → se colapsan (una tabla leída dos veces).
-"""
+"""Fusión conservadora de mediciones compatibles y trazabilidad de modalidades."""
 
 from __future__ import annotations
 
@@ -154,59 +131,43 @@ def reconcile(text_records: list[dict], image_records: list[dict]) -> tuple[list
     """
     stats = ReconcileStats(text_records=len(text_records or []),
                            image_records=len(image_records or []))
+    conditions = ("temperature", "rh", "thickness", "test_method")
+    observations = [(dict(r), TEXT) for r in text_records or []]
+    observations += [(dict(r), IMAGE) for r in image_records or []]
 
-    merged: dict[tuple, dict] = {}
-    order: list[tuple] = []
+    def compatible(a, b):
+        return identity(a) == identity(b) and all(
+            a.get(f) in (None, "", "null") or b.get(f) in (None, "", "null")
+            or _norm_text(a[f]) == _norm_text(b[f]) for f in conditions
+        )
 
-    # 1) Texto: es la fuente de referencia (sin OCR de por medio).
-    for record in text_records or []:
+    merged = []
+    for record, modality in observations:
         key = identity(record)
-        if key[0] == "" or key[1] is None:
-            # Sin polímero o sin valor no hay medición identificable: se descarta.
+        if not key[0] or key[1] is None:
             stats.duplicates_dropped += 1
             continue
-        entry = dict(record)
-        if key in merged:
-            # Mismo valor listado dos veces en el texto: conserva el más rico.
+        candidates = [r for r in merged if compatible(r, record)]
+        # Missing conditions may match multiple distinct experiments.
+        peers = [r for r, _ in observations if compatible(r, record)]
+        ambiguous = any(not compatible(a, b) for a in peers for b in peers)
+        if len(candidates) == 1 and not ambiguous:
+            existing = candidates[0]
             stats.duplicates_dropped += 1
-            if _richness(entry) > _richness(merged[key]):
-                merged[key] = {**merged[key], **entry}
-            continue
-        merged[key] = entry
-        order.append(key)
-
-    # 2) Imágenes.
-    for record in image_records or []:
-        key = identity(record)
-        if key[0] == "" or key[1] is None:
-            stats.duplicates_dropped += 1
-            continue
-        if key in merged:
-            existing = merged[key]
-            stats.corroborated += 1
-            for field_name in _FIELDS:
-                if existing.get(field_name) in (None, "", "null") and \
-                        record.get(field_name) not in (None, "", "null"):
-                    existing[field_name] = record[field_name]
-                    stats.fields_filled_from_image += 1
-            existing["source_kind"] = BOTH
-            existing["corroborated"] = True
-            # La referencia de la imagen se conserva aparte: es la evidencia de
-            # que el dato también estaba en la figura/tabla.
-            existing["source_ref_image"] = record.get("source_ref") or ""
-            existing["source_page_image"] = record.get("source_page")
-            continue
-        entry = dict(record)
-        entry["source_kind"] = IMAGE
-        entry["corroborated"] = False
-        merged[key] = entry
-        order.append(key)
-
-    out = []
-    for key in order:
-        entry = merged[key]
-        entry.setdefault("source_kind", TEXT)
-        entry.setdefault("corroborated", False)
-        out.append(entry)
-
-    return out, stats
+            for field in _FIELDS:
+                if existing.get(field) in (None, "", "null"):
+                    existing[field] = record.get(field)
+                    if modality == IMAGE and record.get(field) is not None:
+                        stats.fields_filled_from_image += 1
+            if modality == IMAGE and existing["source_kind"] in (TEXT, BOTH):
+                if not existing["corroborated"]:
+                    stats.corroborated += 1
+                existing["source_kind"] = BOTH
+                existing["corroborated"] = True
+                existing["source_ref_image"] = record.get("source_ref") or ""
+                existing["source_page_image"] = record.get("source_page")
+        else:
+            record["source_kind"] = modality
+            record["corroborated"] = False
+            merged.append(record)
+    return merged, stats

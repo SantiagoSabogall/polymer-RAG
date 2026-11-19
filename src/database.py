@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 import logging
 import psycopg2
 from psycopg2 import pool
@@ -221,16 +222,10 @@ def ensure_schema(conn):
 
 
 def replace_document(conn, article_title, doi, pdf_url, llm_result, raw_json):
-    """Reemplazo idempotente: borra filas previas del documento e inserta.
-
-    Clave: DOI si existe, si no pdf_url. Re-correr el mismo documento
-    no duplica filas (fix del cuelgue/duplicados de Fase 3).
-    """
-    registros = llm_result.get("registros", [])
-    if not registros:
-        logger.info("No hay registros WVTR para insertar")
-        return 0
-
+    """Publica por clave R2 y conserva las filas cuyo contenido no cambió."""
+    registros = llm_result.get("registros")
+    if not pdf_url or not isinstance(registros, list):
+        raise DatabaseError("Se requiere clave de documento y lista de registros válida")
     rows = []
     for reg in registros:
         rows.append((
@@ -263,11 +258,31 @@ def replace_document(conn, article_title, doi, pdf_url, llm_result, raw_json):
 
     try:
         with conn.cursor() as cur:
-            if doi:
-                cur.execute("DELETE FROM wvtr_data WHERE doi = %s", (doi,))
-            else:
-                cur.execute("DELETE FROM wvtr_data WHERE doi IS NULL AND pdf_url = %s", (pdf_url,))
-            execute_values(cur, query, rows, page_size=1000)
+            # Serialize writers for the same stable R2 key.
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (pdf_url,))
+            cur.execute(
+                "SELECT article_title, doi, polymer, wvtr_value, wvtr_units, "
+                "temperature, rh, thickness, test_method, pdf_url, raw_json, "
+                "source_kind, source_ref, source_page, confidence, corroborated "
+                "FROM wvtr_data WHERE pdf_url = %s ORDER BY id", (pdf_url,)
+            )
+            existing = cur.fetchall()
+            def comparable(row):
+                values = list(row)
+                if isinstance(values[10], str):
+                    values[10] = json.loads(values[10])
+                # Timing and token metadata do not alter the measurement.
+                values[10] = None
+                for index in (3, 14):
+                    if values[index] is not None:
+                        values[index] = Decimal(str(values[index]))
+                return values
+            if [comparable(r) for r in existing] == [comparable(r) for r in rows]:
+                conn.commit()
+                return 0
+            cur.execute("DELETE FROM wvtr_data WHERE pdf_url = %s", (pdf_url,))
+            if rows:
+                execute_values(cur, query, rows, page_size=1000)
         conn.commit()
         logger.info(f"Reemplazados {len(rows)} registros WVTR (doi={doi or 'N/A'})")
         return len(rows)

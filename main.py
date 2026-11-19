@@ -358,9 +358,8 @@ def run_phase_2(progress, errors, dois):
                 with open(md_path, "r", encoding="utf-8", errors="replace") as f:
                     markdown_text = f.read()
                 llm_result = extract_wvtr_with_retry(llm_client, markdown_text, doi, nombre)
-                with file_lock:
-                    add_llm_result(llm_results, pdf_key, doi, etag, llm_result)
-                    save_llm_results(llm_results)
+                add_llm_result(llm_results, pdf_key, doi, etag, llm_result)
+                save_llm_results(llm_results)
                 print(f"OK ({len(llm_result.get('registros', []))} registros)", flush=True)
             except LLMError as e:
                 print(f"FALLÓ ({e})", flush=True)

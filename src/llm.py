@@ -92,8 +92,8 @@ def extract_wvtr(client, markdown_text, doi, pdf_filename):
         content = response.choices[0].message.content
         result = parse_llm_json(content)
 
-        if "registros" not in result:
-            result["registros"] = []
+        if not isinstance(result, dict) or not isinstance(result.get("registros"), list):
+            raise LLMError("La respuesta debe contener una lista registros")
 
         logger.info(
             f"Extraidos {len(result['registros'])} registros de WVTR"
