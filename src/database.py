@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 import logging
 import psycopg2
 from psycopg2 import pool
@@ -176,8 +177,22 @@ def is_already_processed(doi):
         release_connection(conn)
 
 
+PROVENANCE_COLUMNS = (
+    ("source_kind", "TEXT"),
+    ("source_ref", "TEXT"),
+    ("source_page", "INTEGER"),
+    ("confidence", "NUMERIC"),
+    ("corroborated", "BOOLEAN DEFAULT FALSE"),
+)
+
+
 def ensure_schema(conn):
-    """Crea índices idempotentes para upsert/prune (seguro en BD existentes).
+    """Crea índices y migra columnas de forma idempotente (seguro en BD existentes).
+
+    Las columnas de procedencia permiten responder "¿de dónde salió este dato?"
+    — texto, tabla rasterizada, o ambos — sin parsear el JSONB. ``source_kind``
+    distingue registros que la ruta de texto no habría visto nunca, que es
+    justamente el valor añadido de la ruta de imágenes.
 
     Nota: NO se crea UNIQUE(doi) porque un mismo artículo (DOI) tiene
     múltiples filas (una por registro WVTR). La idempotencia la da
@@ -191,6 +206,15 @@ def ensure_schema(conn):
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_wvtr_pdf_url ON wvtr_data(pdf_url)"
             )
+            # ADD COLUMN IF NOT EXISTS: migración segura sobre la tabla que crea
+            # docker/init.sql, sin tocar datos existentes.
+            for column, sql_type in PROVENANCE_COLUMNS:
+                cur.execute(
+                    f"ALTER TABLE wvtr_data ADD COLUMN IF NOT EXISTS {column} {sql_type}"
+                )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_wvtr_source ON wvtr_data(source_kind)"
+            )
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -198,16 +222,10 @@ def ensure_schema(conn):
 
 
 def replace_document(conn, article_title, doi, pdf_url, llm_result, raw_json):
-    """Reemplazo idempotente: borra filas previas del documento e inserta.
-
-    Clave: DOI si existe, si no pdf_url. Re-correr el mismo documento
-    no duplica filas (fix del cuelgue/duplicados de Fase 3).
-    """
-    registros = llm_result.get("registros", [])
-    if not registros:
-        logger.info("No hay registros WVTR para insertar")
-        return 0
-
+    """Publica por clave R2 y conserva las filas cuyo contenido no cambió."""
+    registros = llm_result.get("registros")
+    if not pdf_url or not isinstance(registros, list):
+        raise DatabaseError("Se requiere clave de documento y lista de registros válida")
     rows = []
     for reg in registros:
         rows.append((
@@ -221,23 +239,50 @@ def replace_document(conn, article_title, doi, pdf_url, llm_result, raw_json):
             reg.get("thickness"),
             reg.get("test_method"),
             pdf_url,
-            json.dumps(raw_json, ensure_ascii=False)
+            json.dumps(raw_json, ensure_ascii=False),
+            # Procedencia: la fija reconcile(), no el LLM.
+            reg.get("source_kind"),
+            reg.get("source_ref"),
+            reg.get("source_page"),
+            reg.get("confidence"),
+            reg.get("corroborated"),
         ))
 
     query = """
         INSERT INTO wvtr_data (
             article_title, doi, polymer, wvtr_value, wvtr_units,
-            temperature, rh, thickness, test_method, pdf_url, raw_json
+            temperature, rh, thickness, test_method, pdf_url, raw_json,
+            source_kind, source_ref, source_page, confidence, corroborated
         ) VALUES %s
     """
 
     try:
         with conn.cursor() as cur:
-            if doi:
-                cur.execute("DELETE FROM wvtr_data WHERE doi = %s", (doi,))
-            else:
-                cur.execute("DELETE FROM wvtr_data WHERE doi IS NULL AND pdf_url = %s", (pdf_url,))
-            execute_values(cur, query, rows, page_size=1000)
+            # Serialize writers for the same stable R2 key.
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (pdf_url,))
+            cur.execute(
+                "SELECT article_title, doi, polymer, wvtr_value, wvtr_units, "
+                "temperature, rh, thickness, test_method, pdf_url, raw_json, "
+                "source_kind, source_ref, source_page, confidence, corroborated "
+                "FROM wvtr_data WHERE pdf_url = %s ORDER BY id", (pdf_url,)
+            )
+            existing = cur.fetchall()
+            def comparable(row):
+                values = list(row)
+                if isinstance(values[10], str):
+                    values[10] = json.loads(values[10])
+                # Timing and token metadata do not alter the measurement.
+                values[10] = None
+                for index in (3, 14):
+                    if values[index] is not None:
+                        values[index] = Decimal(str(values[index]))
+                return values
+            if [comparable(r) for r in existing] == [comparable(r) for r in rows]:
+                conn.commit()
+                return 0
+            cur.execute("DELETE FROM wvtr_data WHERE pdf_url = %s", (pdf_url,))
+            if rows:
+                execute_values(cur, query, rows, page_size=1000)
         conn.commit()
         logger.info(f"Reemplazados {len(rows)} registros WVTR (doi={doi or 'N/A'})")
         return len(rows)

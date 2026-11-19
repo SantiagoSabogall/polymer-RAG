@@ -11,10 +11,12 @@ Pregunta → Embedding → Búsqueda → Contexto → LLM → Respuesta
 import re
 from openai import OpenAI
 try:
+    from .analytics import analytics_answer, is_analytics_question
     from .database import get_connection, release_connection
     from .embeddings import get_embedding, generate_record_text
     from .config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
 except ImportError:
+    from analytics import analytics_answer, is_analytics_question
     from database import get_connection, release_connection
     from embeddings import get_embedding, generate_record_text
     from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL
@@ -80,7 +82,7 @@ def search_similar(query: str, limit: int = 10) -> list:
                 rh, thickness, test_method
             FROM wvtr_data
             WHERE embedding IS NOT NULL
-            ORDER BY embedding <-> %s
+            ORDER BY embedding <=> %s::vector
             LIMIT %s
         """, (str(query_embedding), fetch_limit))
         
@@ -135,7 +137,7 @@ def search_similar(query: str, limit: int = 10) -> list:
                         FROM wvtr_data
                         WHERE embedding IS NOT NULL
                           AND temperature ILIKE %s
-                        ORDER BY embedding <-> %s
+                        ORDER BY embedding <=> %s::vector
                         LIMIT 2
                     """, (f'%{mt}%', str(query_embedding)))
                     
@@ -206,15 +208,35 @@ def get_db_stats() -> dict:
         cur.execute("SELECT COUNT(*) FROM wvtr_data WHERE doi IS NOT NULL")
         records_with_doi = cur.fetchone()[0]
         
+        cur.execute("""
+            SELECT COUNT(*) FROM wvtr_data
+            WHERE temperature IS NOT NULL
+              AND lower(btrim(temperature)) NOT IN
+                  ('', 'null', 'none', 'n/a', 'na', 'unknown',
+                   'not reported', 'not specified', 'sin datos', 'no disponible', '—', '-')
+        """)
+        records_with_temperature = cur.fetchone()[0]
+        cur.execute("""
+            SELECT article_title, COUNT(*)
+            FROM wvtr_data
+            GROUP BY article_title
+            ORDER BY COUNT(*) DESC, article_title ASC NULLS LAST
+        """)
+        records_by_article = [
+            {"article_title": title, "records": count}
+            for title, count in cur.fetchall()
+        ]
         cur.close()
     finally:
         release_connection(conn)
-    
+
     return {
         "total_records": total_records,
         "total_polymers": total_polymers,
         "total_articles": total_articles,
-        "records_with_doi": records_with_doi
+        "records_with_doi": records_with_doi,
+        "records_with_temperature": records_with_temperature,
+        "records_by_article": records_by_article
     }
 
 
@@ -238,9 +260,23 @@ def format_context(results: list, db_stats: dict = None) -> str:
 - Polímeros únicos: {db_stats['total_polymers']}
 - Artículos únicos: {db_stats['total_articles']}
 - Registros con DOI: {db_stats['records_with_doi']}
+- Registros con temperatura informada: {db_stats['records_with_temperature']}
+Estas estadísticas abarcan toda la base. Los registros recuperados abajo son una muestra.
+Para conteos globales de temperatura usa la estadística anterior.
+Para subconjuntos sin estadística disponible indica que falta un conteo específico.
 
 """
         context_parts.append(stats_section)
+        article_counts = "\n".join(
+            f"- {row['article_title'] or 'Título no disponible'}: {row['records']} registros"
+            for row in db_stats.get("records_by_article", [])
+        )
+        context_parts.append(
+            "CONTEO GLOBAL POR TÍTULO DE ARTÍCULO, de mayor a menor. "
+            "Cuenta filas almacenadas. Usa este conteo para identificar el artículo "
+            "que más aporta y menciona todos los empates en el primer lugar.\n"
+            + article_counts
+        )
     
     for i, r in enumerate(results, 1):
         part = f"""
@@ -382,6 +418,9 @@ def rag_query(question: str, limit: int = 10) -> dict:
     Returns:
         dict: {answer, sources, context_used}
     """
+    if is_analytics_question(question):
+        return analytics_answer(llm_client, LLM_MODEL, question)
+
     # 1. Obtener estadísticas de la BD
     db_stats = get_db_stats()
     

@@ -31,6 +31,8 @@ dependencies = [
     "psycopg2-binary>=2.9.0",
     "pgvector>=0.2.0",
     "opendataloader-pdf>=0.1.0",
+    "pillow>=10.0.0",
+    "pypdf>=4.0.0",
     "boto3>=1.28.0",
     "nest-asyncio>=1.5.0",
     "streamlit>=1.28.0",
@@ -51,10 +53,11 @@ all = [
 ]
 
 [project.scripts]
-pipeline = "main:main"
+pipeline = "src.pipeline:main"
 api-server = "api.server:main"
 embeddings = "scripts.generate_embeddings:main"
 benchmark-run = "benchmark.run_model:main"
+benchmark-evaluate = "benchmark.evaluate:main"
 
 [project.urls]
 Homepage = "https://github.com/SantiagoSabogall/polymer-RAG"

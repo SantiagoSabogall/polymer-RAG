@@ -12,6 +12,8 @@
 
 This repository implements an automated pipeline for extracting Water Vapor Transmission Rate (WVTR) measurements from polymer science literature. The system processes scientific PDFs, converts them to structured markdown, and utilizes Large Language Models (LLMs) to extract experimental WVTR data with associated conditions (polymer type, temperature, relative humidity, film thickness, and test method). Extracted data is stored in a PostgreSQL database for systematic analysis and retrieval.
 
+Since v2, the pipeline also reads **images**: tables that arrive as a rasterized picture instead of extractable text are recovered by a vision model.
+
 ---
 
 ## 1. Scientific Context
@@ -25,14 +27,16 @@ Water Vapor Transmission Rate (WVTR) is a critical metric for evaluating the bar
 This pipeline automates the extraction process:
 
 ```
-PDF Literature → Markdown → LLM Extraction → Structured JSON → PostgreSQL Database
+PDF Literature → Markdown + Images → LLM Extraction → Structured JSON → PostgreSQL Database
 ```
 
 ### 1.3 Key Features
 
 - **Automated PDF Processing**: Downloads PDFs from Cloudflare R2, converts to markdown, and cleans formatting artifacts
-- **LLM-Based Extraction**: Utilizes GPT-5.6 Luna (via OpenRouter) for structured data extraction
-- **Deduplication**: Prevents duplicate entries by tracking DOI identifiers
+- **Text Extraction**: GPT-5.6 Luna (via OpenRouter) for structured data extraction
+- **Image Extraction**: recovers WVTR tables that are rasterized pictures, via a cheap vision gate followed by the same GPT-5.6 Luna
+- **Deduplication**: Prevents duplicate entries by tracking DOI identifiers; reconciles values seen in both text and image into a single row
+- **Provenance**: every row records whether it came from `text`, `image`, or `text+image`
 - **Connection Pooling**: Efficient PostgreSQL connection management for batch operations
 - **Structured Logging**: JSON-formatted logs for reproducibility and audit trails
 - **Cost Tracking**: Monitors API usage and associated costs
@@ -240,16 +244,50 @@ curl -X POST http://localhost:8001/query \
 
 ### 3.5 Benchmark Models
 
-Compare extraction performance across multiple LLMs:
+Run a model on the Markdown corpus. Each model writes an aggregate
+`results-<model hash>.json` under `temp/benchmark/`, with per-document caches
+keyed by input content, model and prompt. Failed responses are retried on the next run.
 
 ```bash
-uv run benchmark-run openai/gpt-5.6-luna
-uv run benchmark-run deepseek/deepseek-v4-flash-0731
-uv run benchmark-run google/gemini-3.8-flash
-uv run benchmark-run z-ai/glm-5.3-flash
-
-# Generate comparison Excel
+uv run benchmark-run openai/gpt-5.6-luna --input-dir benchmark/papers --output-dir temp/benchmark
+uv run benchmark-evaluate --results temp/benchmark/results-MODEL_HASH.json --ground-truth benchmark/ground_truth.json
 uv run python benchmark/generate_excel.py
+```
+
+Use the actual results path printed by the runner. Evaluation excludes papers without
+an explicit `expected` annotation and reports their names and coverage. An annotated
+empty list means the paper has no WVTR measurements. Matching requires polymer,
+verbatim units and a numeric value within 10% relative tolerance; field accuracy is
+reported separately. The supplied ground-truth file is an example and still needs
+annotations for the seven corpus papers. Zero evaluated papers returns exit status 1.
+
+### Pipeline entry points and installation
+
+`pipeline`, `python main.py`, `python main_test.py` and `python -m src.pipeline`
+invoke the same text-and-image pipeline. The existing phase flags remain available.
+`main.py` now includes the image route. Current progress stays in
+`temp/progress_test.json`, `temp/dois_test.json` and `temp/results/`.
+Older `main.py` files such as `progress.json` are retained; their text-only results
+are not automatically certified as current image extractions.
+
+```bash
+pipeline --phase 1 --dry-run
+pipeline --phase 1
+pipeline --phase 2
+pipeline --phase 3 --no-prune
+```
+
+By default, data is stored under `./temp` and credentials are read from
+`./API_KEY.env`, relative to the working directory. Set `WVTR_DATA_DIR`
+and `WVTR_ENV_FILE` to absolute paths when running from another directory.
+Environment variables take precedence over the credential file.
+
+```bash
+uv build
+uv pip install dist/wvtr_extraction-1.3.0-py3-none-any.whl
+pipeline --help
+benchmark-run --help
+benchmark-evaluate --help
 ```
 
 ### 3.6 Services Summary
@@ -295,21 +333,59 @@ uv run python benchmark/generate_excel.py
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 Directory Structure
+### 4.2 Image Pipeline (v2)
+
+WVTR tables are frequently published as pictures rather than text. `opendataloader-pdf` already converts *vector* tables into HTML, but a rasterized table produces no text at all — the data was invisible to the pipeline.
+
+Four stages, each answering a different question:
+
+| Stage | Question | Cost | Module |
+|-------|----------|------|--------|
+| Manifest | What images exist, and where? | free (from `outline.json`) | `src/image_manifest.py` |
+| Heuristic | Is it obviously not a data table? | free (Pillow) | `src/image_filter.py` |
+| Gate | Does it actually *print* WVTR values? | ~$0.0003/image | `src/vision_gate.py` |
+| Extract | What are the values? | ~$0.0009/image | `src/llm_vision.py` |
+
+Measured on a real Springer paper: **38 images extracted → 24 discarded for free → 14 gated → 0 selected** (the paper contained no WVTR data). On a synthetic rasterized WVTR table: 14 gated → 1 selected → **5/5 rows extracted with every field correct**.
+
+**Two models, deliberately:**
+
+| Role | Model | $/1M in/out | Why |
+|------|-------|-------------|-----|
+| Gate | `google/gemini-2.5-flash-lite` | 0.10 / 0.40 | Cheap, zero reasoning tokens, structured outputs |
+| Extract | `openai/gpt-5.6-luna` | 0.20 / 1.20 | Already the benchmark winner; vision + structured outputs |
+
+`gpt-5-nano` is $0.05/M in but was rejected: with `reasoning_effort=minimal` it mislabeled a rheology plot as a `graphical_abstract`, and that bias runs in the dangerous direction — a rasterized WVTR table dismissed as a graphical abstract is an irreversible false negative.
+
+**Plots are not digitized.** Bar/line charts encode values as geometry, and reading a value off an axis is an estimate, not a measurement. The gate marks them `table_readable: false` and they are dropped. They can still corroborate values found elsewhere.
+
+**Why a gate at all?** At ~$0.0003 per image, sending all extracted images to the extractor would cost ~$0.0025 each. On a 38-image paper that is a 80x increase for zero precision gain, since most images are publisher logos and chemical schemes.
+
+### 4.3 Directory Structure
 
 ```
 polymer-RAG/
 ├── src/                          # Source modules
 │   ├── config.py                 # Configuration management
 │   ├── cloudfareR2.py            # Cloudflare R2 integration
-│   ├── pdf_to_markdown.py        # PDF → Markdown conversion
+│   ├── pdf_to_markdown.py        # PDF → Markdown (+ images + outline.json)
 │   ├── clean_markdown.py         # Markdown cleaning (regex)
-│   ├── prompt.py                 # LLM prompts
-│   ├── llm.py                    # LLM interaction utilities
+│   ├── prompt.py                 # Text LLM prompt
+│   ├── prompt_vision.py          # Gate + vision prompts and JSON schemas
+│   ├── llm.py                    # Text LLM interaction utilities
+│   ├── image_manifest.py         # Image inventory (page, bbox, PNG stats)
+│   ├── image_filter.py           # Free heuristic discards
+│   ├── vision_gate.py            # Typesafe "does this print WVTR?"
+│   ├── llm_vision.py             # WVTR extraction from images
+│   ├── reconcile.py              # Text + image merge and dedup
 │   ├── database.py               # PostgreSQL with pooling
 │   ├── embeddings.py             # Embedding generation
 │   ├── rag.py                    # RAG engine (search + generation)
 │   └── monitoring.py             # Structured logging & metrics
+├── tests/
+│   ├── test_vision_pipeline.py   # 54 unit tests, no network
+│   ├── test_vision_e2e.py        # 3 integration tests (need OPENROUTE_API)
+│   └── fixtures/                 # Synthetic rasterized WVTR table
 ├── api/                          # REST API
 │   └── server.py                 # FastAPI server
 ├── app/                          # Web UI
@@ -325,8 +401,8 @@ polymer-RAG/
 ├── docker/                       # Docker configuration
 │   ├── init.sql                  # Database schema initialization
 │   └── Dockerfile.postgres       # Custom PostgreSQL image
-├── main_test.py                  # Main pipeline entry point
-├── main.py                       # Alternative pipeline
+├── main_test.py                  # Compatibility entry point for src.pipeline
+├── main.py                       # Compatibility entry point for src.pipeline
 ├── docker-compose.yml            # Docker services
 ├── .env                          # Docker variables (gitignored)
 ├── API_KEY.env                   # Python credentials (gitignored)
@@ -378,22 +454,30 @@ polymer-RAG/
 | `test_method` | TEXT | ASTM/ISO standard |
 | `pdf_url` | TEXT | Source PDF reference |
 | `raw_json` | JSONB | Complete extraction result |
+| `source_kind` | TEXT | `text` \| `image` \| `text+image` |
+| `source_ref` | TEXT | Image file, e.g. `imageFile9.png` (image rows) |
+| `source_page` | INTEGER | 1-based page of the image |
+| `confidence` | NUMERIC | Extractor confidence, when available |
+| `corroborated` | BOOLEAN | Value seen in **both** text and image |
 | `created_at` | TIMESTAMP | Record creation time |
+| `embedding` | vector(1536) | pgvector embedding |
+
+The provenance columns are added idempotently by `ensure_schema()`, so existing
+databases migrate on the next run without manual SQL.
 
 ### 6.2 Example Query
 
 ```sql
--- Find all PBAT measurements
-SELECT 
-    article_title,
-    polymer,
-    wvtr_value,
-    wvtr_units,
-    temperature,
-    rh
-FROM wvtr_data 
-WHERE polymer ILIKE '%PBAT%'
+-- Rows that only exist because of the image pipeline
+SELECT article_title, polymer, wvtr_value, wvtr_units, source_ref, source_page
+FROM wvtr_data
+WHERE source_kind = 'image'
 ORDER BY wvtr_value;
+
+-- Values confirmed by two independent readings (text and figure)
+SELECT doi, polymer, wvtr_value, source_kind
+FROM wvtr_data
+WHERE corroborated = TRUE;
 ```
 
 ---
@@ -448,7 +532,25 @@ git tag -l
 git checkout v1.1-core
 ```
 
-### 8.3 Logging
+### 8.3 Testing
+
+```bash
+# 54 unit tests: manifest geometry, heuristics, schemas, value parsing, dedup.
+# No network, no PDF, no API key.
+.venv/bin/python -m unittest discover -s tests
+
+# 3 integration tests: real gate + real extractor over a synthetic rasterized
+# WVTR table with known ground truth. Skipped automatically without a key.
+.venv/bin/python -m unittest tests.test_vision_e2e -v
+
+# Regenerate the ground-truth fixture
+.venv/bin/python tests/fixtures/make_wvtr_table.py
+
+# Lint
+ruff check src/ tests/
+```
+
+### 8.4 Logging
 
 All pipeline runs generate structured logs in `temp/pipeline.log`:
 
@@ -464,6 +566,19 @@ All pipeline runs generate structured logs in `temp/pipeline.log`:
   }
 }
 ```
+
+Phase 2 also logs a per-document image summary:
+
+```
+[IMAGES] paper.md: 38 extraidas, 14 tras heuristica (drops={'tiny_px': 23, 'few_colors': 1})
+[GATE] imageFile27.png (p.5, 1506px->768px) kind=plot wvtr=False legible=False conf=1.00 -> descartar
+[VISION] imageFile3.png (p.9): 12 registros, 1442/467 tokens, 6.1s
+[RECONCILE] paper.md: texto=29 imagen=5 -> final=32 (corroborados=2, colapsados=0)
+```
+
+A per-image `gate_verdicts` array is also written to
+`temp/results/{stem}__gpt-5.6-luna.json`, so gate false negatives can be audited
+without re-running or re-paying.
 
 ---
 
